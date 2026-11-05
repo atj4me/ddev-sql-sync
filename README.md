@@ -1,6 +1,9 @@
 # DDEV sql-sync
 
+[![add-on registry](https://img.shields.io/badge/DDEV-Add--on_Registry-blue)](https://addons.ddev.com)
 [![tests](https://github.com/atj4me/ddev-sql-sync/actions/workflows/tests.yml/badge.svg)](https://github.com/atj4me/ddev-sql-sync/actions/workflows/tests.yml)
+[![last commit](https://img.shields.io/github/last-commit/atj4me/ddev-sql-sync)](https://github.com/atj4me/ddev-sql-sync/commits)
+[![release](https://img.shields.io/github/v/release/atj4me/ddev-sql-sync)](https://github.com/atj4me/ddev-sql-sync/releases/latest)
 
 Sync a production MySQL database into your local [DDEV](https://ddev.com) project — modelled on Drush's `sql-sync`, for any plain SSH-accessible server (a VPS running Laravel, WordPress, Drupal, …), not just hosted platforms.
 

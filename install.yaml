@@ -1,5 +1,5 @@
 name: sql-sync
-ddev_version_constraint: '>= v1.24.0'
+ddev_version_constraint: '>= v1.24.10'
 project_files:
   - commands/host/sql-sync
   - sql-sync/remote-dump.sh
