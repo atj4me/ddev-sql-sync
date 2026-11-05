@@ -183,13 +183,16 @@ PHP
     return 0
   fi
   rm -f "$extractor"
-  {
-    IFS= read -r DB_DATABASE
-    IFS= read -r DB_USERNAME
-    IFS= read -r DB_PASSWORD
-    IFS= read -r DB_HOST
-    IFS= read -r DB_PORT
-  } <<< "$creds"
+  # mapfile, not a read loop: the extractor's trailing empty fields (e.g. an
+  # empty port) would otherwise make the last read hit EOF and, under
+  # set -e, kill the script after a successful extraction.
+  local -a cred_lines=()
+  mapfile -t cred_lines <<< "$creds"
+  DB_DATABASE="${cred_lines[0]:-}"
+  DB_USERNAME="${cred_lines[1]:-}"
+  DB_PASSWORD="${cred_lines[2]:-}"
+  DB_HOST="${cred_lines[3]:-}"
+  DB_PORT="${cred_lines[4]:-}"
 }
 
 case "$PLATFORM" in

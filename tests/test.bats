@@ -142,9 +142,8 @@ FIXEOF
   assert_success
   assert_output --partial "using mysqldump"
   run cat "${SQL_SYNC_TEST_CAPTURE}"
-  assert_output --partial "-u fixtureuser"
+  assert_output --partial "args: -h 127.0.0.1 -u fixtureuser"
   assert_output --partial "fixturedb"
-  assert_output --partial "-h 127.0.0.1"
   assert_output --partial "pw: fixturepass"
 }
 
@@ -163,11 +162,9 @@ FIXEOF
   run env PATH="${STUB_DIR}:/usr/bin:/bin" SQL_SYNC_ROOT="${FIXTURE_DIR}" SQL_SYNC_TMP="${FIXTURE_DIR}" SQL_SYNC_PLATFORM=laravel SQL_SYNC_DB_PASSWORD=override-pass SQL_SYNC_DB_HOST=db.internal.example SQL_SYNC_DB_PORT=3307 bash "${DIR}/sql-sync/remote-dump.sh"
   assert_success
   run cat "${SQL_SYNC_TEST_CAPTURE}"
-  assert_output --partial "-u mergeuser"
+  assert_output --partial "args: -h db.internal.example -P 3307 -u mergeuser"
   assert_output --partial "mergedb"
   assert_output --partial "pw: override-pass"
-  assert_output --partial "-h db.internal.example"
-  assert_output --partial "-P 3307"
 }
 
 @test "remote dump: wp-config fixture, mysqldump when wp-cli is absent" {
@@ -186,7 +183,7 @@ FIXEOF
   assert_success
   assert_output --partial "using mysqldump"
   run cat "${SQL_SYNC_TEST_CAPTURE}"
-  assert_output --partial "-u wpuser"
+  assert_output --partial "args: -u wpuser"
   assert_output --partial "wpdb"
   assert_output --partial "pw: wppass"
 }
@@ -287,7 +284,7 @@ FIXEOF
   assert_success
   assert_output --partial "using mysqldump"
   run cat "${SQL_SYNC_TEST_CAPTURE}"
-  assert_output --partial "-u drupaluser"
+  assert_output --partial "args: -u drupaluser"
   assert_output --partial "drupaldb"
   assert_output --partial "pw: drupalpass"
 }
