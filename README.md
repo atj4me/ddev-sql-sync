@@ -8,8 +8,8 @@ Sync a production MySQL database into your local [DDEV](https://ddev.com) projec
 
 `ddev sql-sync @prod @self`:
 
-1. **Dump** — ssh to the server and create a database dump in a temp file there. See *Dump strategies* below.
-2. **Download** — rsync the dump into a local folder (default `~/sql-sync`), then delete the remote temp file.
+1. **Dump** — ssh to the server and create a database dump there, staged in a dedicated private folder (`<tmp>/ddev-dumps/`) with a completion marker carrying its byte size. See *Dump strategies* below.
+2. **Download** — rsync the dump into a local folder (default `~/sql-sync`) and verify it against the completion marker before anything is imported. The remote temp files are deleted after a successful import (kept if the import fails, so the same dump can be fetched again with `--no-dump`).
 3. **Import** — `ddev import-db` into this project (you are asked to confirm first; the current local database is replaced).
 4. **Sanitize** — scrub user emails and passwords in the *local* database (on by default; see *Sanitize*).
 
@@ -93,26 +93,26 @@ ddev sql-sync @prod @self --dry-run # preflight checks only — nothing is dumpe
 | --- | --- |
 | `--sanitize` / `--no-sanitize` | Sanitize after import (default on) / skip it. Skipping prints a loud warning: the local DB then holds real production emails and password hashes. |
 | `--dump-dir=<path>` | Where the dump is downloaded to (overrides `local.dir`). |
-| `--no-dump` | Don't create a new dump; rsync the dump file an earlier `--no-sync` run left on the server. |
-| `--no-sync` | Only create the dump on the server; don't download, import, or sanitize. |
-| `--dry-run` | Preflight only: check ssh connectivity, platform, dump strategy, credentials (the password is never shown), database size and disk space, then print the plan. Takes no dump, imports nothing, and writes nothing on the server. See "Testing safely". |
+| `--no-dump` | Don't create a new dump; rsync the dump an earlier `--no-sync` run left on the server. Its completion marker must be present and match the downloaded size, or the run refuses to import. |
+| `--no-sync` | Only create the dump on the server (with its completion marker); don't download, import, or sanitize. A later `--no-dump` run fetches it. |
+| `--dry-run` | Preflight only: check ssh connectivity, platform, dump strategy, credentials (the password is never shown), database size and disk space, then print the plan. Takes no dump and imports nothing. See "Testing safely" for one small footnote. |
 | `-y`, `--yes` | Don't ask for confirmation. |
 | `-h`, `--help` | Show help. |
 
-Dumps land at `<dump-dir>/<alias>.sql` and are **kept** after import (handy for re-importing). They contain production data — delete them when you no longer need them: `rm ~/sql-sync/*.sql`.
+Dumps land at `<dump-dir>/<alias>.sql` (or `<alias>.sql.gz` when the dump is gzipped) and are **kept** after import (handy for re-importing). They contain production data — delete them when you no longer need them: `rm ~/sql-sync/*.sql`.
 
 ## Platforms
 
 The dump strategy per alias, in order:
 
 1. **`dump:` override** — if the alias sets one, it always wins.
-2. **The app's own export tool**, run on the server in the app root, if the platform has one *and* it's installed there (checked at run time; if missing, the next strategy is used instead of failing):
+2. **The app's own export tool**, run on the server in the app root, if the platform has one *and* it's installed there (checked at run time; if missing, the next strategy is used instead of failing). A non-interactive ssh session gets a minimal PATH, so WP-CLI is also probed in `~/bin`, `~/.local/bin` and `/usr/local/bin`, and Drush in the app's `vendor/bin`:
    - WordPress → `wp db export` (WP-CLI)
    - Drupal → `drush sql-dump`
    - Laravel → **no native data export exists** (`schema:dump` is structure-only), so Laravel always uses strategy 3.
 3. **mysqldump** — with credentials resolved as described above (explicit `database:` block merged over the app's config).
 
-The run tells you which strategy it used (`using WP-CLI export`, `using mysqldump`, …).
+The run tells you which strategy it used: `using the app's own export: wp db export`, `using the app's own export: drush sql-dump`, `using the alias's dump: command`, or `using mysqldump`.
 
 Platform notes:
 
@@ -126,9 +126,11 @@ Platform notes:
 Runs after import, on the local database only:
 
 - **Laravel** — bundled SQL: `users.email` → `user<id>@example.test`, `users.password` → bcrypt of `password`, `remember_token` → `NULL`.
-- **WordPress** — bundled SQL: `wp_users.user_email` → `user<id>@example.test`, `wp_users.user_pass` → `MD5('password')` (WordPress accepts MD5 at login and rehashes transparently). Assumes the default `wp_` prefix.
-- **Drupal** — `ddev drush sql-sanitize` when the local project has Drush (Drupal hashes passwords in PHP, so there is deliberately **no** bundled SQL sanitize for it). Otherwise a `sanitize:` file from the alias is used; if neither exists, the run says plainly that no sanitize ran.
-- **Any platform** — an explicit `sanitize:` file in the alias is honoured; if no sanitize applies to a platform, the output says so rather than silently skipping.
+- **WordPress** — bundled SQL against the site's actual users table: `<prefix>users.user_email` → `user<id>@example.test`, `<prefix>users.user_pass` → `MD5('password')` (WordPress accepts MD5 at login and rehashes transparently). The prefix is read from the server's `wp-config.php` — a custom `$table_prefix` is honoured, not assumed to be `wp_` (on `--no-dump` runs it is detected from the imported tables instead).
+- **Drupal** — `ddev drush sql-sanitize` when the local project has Drush (Drupal hashes passwords in PHP, so there is deliberately **no** bundled SQL sanitize for it).
+- **Any platform** — an explicit `sanitize:` file in the alias, when set, is used **instead of** the built-in sanitize on every platform — including Drupal, where it wins over `drush sql-sanitize` (explicit per-alias config wins, as with `dump:` and `database:`).
+
+If sanitize is on (the default) but nothing could be applied — no matching table, no Drush, no `sanitize:` file — the run imports and then **stops with a prominent error and a non-zero exit**: it never reports success over an unsanitized database. Pass `--no-sanitize` to accept an unsanitized import explicitly.
 
 ## Relationship to Drush `sql-sync`
 
@@ -142,17 +144,18 @@ Deviations, also deliberate:
 
 ## Testing safely
 
-New server, or just cautious? Work up in three steps:
+New server, or just cautious? Work up in four steps:
 
-1. **`ddev sql-sync @prod @self --dry-run`** — preflight only. It connects over ssh (BatchMode, short timeout, so it fails fast instead of hanging), detects the platform and dump strategy on the server, resolves the credentials (database name and username are shown; the password never is), estimates the database size from `information_schema`, and checks free space in the server's `tmp` folder and your local dump folder. You get a verdict per check plus the plan — then it stops. No dump is taken, nothing is imported, and nothing is written on the server.
-2. **`ddev sql-sync @prod @self --no-sync`** — a real dump, created on the server and downloaded, but **not** imported or sanitized. Inspect the file if you like.
-3. **`ddev sql-sync @prod @self`** — the full run.
+1. **`ddev sql-sync @prod @self --dry-run`** — preflight only. It connects over ssh (BatchMode, short timeout, so it fails fast instead of hanging), detects the platform and dump strategy on the server, resolves the credentials (database name and username are shown; the password never is), estimates the database size from `information_schema`, and checks free space in the server's `tmp` folder and your local dump folder. You get a verdict per check plus the plan — then it stops. No dump is taken and nothing is imported. One footnote: resolving *Drupal* credentials during preflight briefly creates a small temp file (mode 600) in the server's `tmp` folder and deletes it again within the same step — it is the extractor for `settings.php`, not a dump.
+2. **`ddev sql-sync @prod @self --no-sync`** — a real dump, created on the server in `<tmp>/ddev-dumps/` with a completion marker. **Nothing is downloaded** — the point of this step is proving the server side works end to end and leaving a known-good dump in place.
+3. **`ddev sql-sync @prod @self --no-dump`** — fetch the dump step 2 left behind (its completion marker is checked against the downloaded size before anything is imported), then import and sanitize it — without touching the server's database again.
+4. **`ddev sql-sync @prod @self`** — the full run.
 
-What a real run writes on the server: exactly one temp file, `sql-sync.sql` in the alias's `tmp` folder, removed right after the download (see Safety notes). One guard protects small servers: before dumping, every run estimates the database size and aborts if the `tmp` filesystem has less free space than that — a dump filling the disk is the one realistic way a sync could hurt a small server.
+What a real run writes on the server: a dump file and a small completion marker in `<tmp>/ddev-dumps/` inside the alias's `tmp` folder (the folder is created mode 700, the dump mode 600), both removed after a successful import. If the import fails, both are kept so a `--no-dump` run can fetch the same dump; if the dump itself fails, its partial file is removed by the remote side. One guard protects small servers: before dumping, a run estimates the database size and aborts if the `tmp` filesystem has less free space than that — whenever the size can be estimated. When it cannot (for example a `dump:` command whose credentials cannot be resolved, or no `mysql` client on the server), the run says so and skips the check rather than pretending it happened — a dump filling the disk is the one realistic way a sync could hurt a small server, so an un-estimable database deserves a second look at the server's free space before a full run.
 
 ## Safety notes
 
-- The only operation ever performed on the server is creating a dump file in the alias's `tmp` folder (removed after download) — plus whatever a `dump:` command *you* configured chooses to do.
+- The only operations ever performed on the server are creating the dump and its completion marker in `<tmp>/ddev-dumps/` (removed after a successful import; a failed dump removes its own partial file) — plus whatever a `dump:` command *you* configured chooses to do.
 - A downloaded dump is production data. The default sanitize scrubs the local **database**, not the dump file on disk; delete dumps you don't need.
 - The add-on stores no credentials of its own anywhere.
 

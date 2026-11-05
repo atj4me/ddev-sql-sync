@@ -27,7 +27,6 @@ echo "sql-sync (remote): platform: $PLATFORM"
 PREFLIGHT="${SQL_SYNC_PREFLIGHT:-}"
 PREFLIGHT_FAILED=""
 DUMP_CMD="${SQL_SYNC_DUMP_CMD:-}"
-OUT="$TMP_DIR/sql-sync.sql"
 
 fail() {
   echo "sql-sync (remote): $*" >&2
@@ -41,12 +40,27 @@ cd "$ROOT" || fail "cannot cd to the app path $ROOT"
 STRATEGY=""
 STRATEGY_LABEL=""
 DRUSH_BIN=""
+WP_BIN=""
 if [ -n "$DUMP_CMD" ]; then
   STRATEGY="dump"
   STRATEGY_LABEL="the alias's dump: command"
-elif [ "$PLATFORM" = "wordpress" ] && command -v wp >/dev/null 2>&1; then
-  STRATEGY="wp"
-  STRATEGY_LABEL="wp db export (the app's own export)"
+elif [ "$PLATFORM" = "wordpress" ]; then
+  WP_BIN="$(command -v wp || true)"
+  if [ -z "$WP_BIN" ]; then
+    # A non-interactive ssh session gets sshd's minimal PATH, and WP-CLI's
+    # commonest install locations sit outside it — probe them explicitly
+    # before giving up on the app's own export.
+    for wp_candidate in "$HOME/bin/wp" "$HOME/.local/bin/wp" /usr/local/bin/wp; do
+      if [ -x "$wp_candidate" ]; then
+        WP_BIN="$wp_candidate"
+        break
+      fi
+    done
+  fi
+  if [ -n "$WP_BIN" ]; then
+    STRATEGY="wp"
+    STRATEGY_LABEL="wp db export (the app's own export)"
+  fi
 elif [ "$PLATFORM" = "drupal" ]; then
   DRUSH_BIN="$(command -v drush || true)"
   if [ -z "$DRUSH_BIN" ] && [ -x "$ROOT/vendor/bin/drush" ]; then
@@ -70,6 +84,7 @@ DB_PASSWORD=""
 DB_HOST=""
 DB_PORT=""
 DB_SOCKET=""
+WP_TABLE_PREFIX=""
 
 extract_env() {
   # Laravel (and any .env app, e.g. Bedrock WordPress): DB_* from <root>/.env
@@ -79,12 +94,18 @@ extract_env() {
   fi
   read_env() {
     local line
-    line="$(grep -E "^$1=" .env | tail -n 1)" || line=""
+    line="$(grep -E "^(export[[:space:]]+)?$1=" .env | tail -n 1)" || line=""
     line="${line#*=}"
-    line="${line%\"}"
-    line="${line#\"}"
-    line="${line%\'}"
-    line="${line#\'}"
+    # Trim whitespace, then unwrap: a quoted value keeps everything up to
+    # its closing quote (a # inside quotes is literal); an unquoted value
+    # ends at a " #" inline comment.
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    case "$line" in
+      \"*) line="${line#\"}"; line="${line%%\"*}" ;;
+      \'*) line="${line#\'}"; line="${line%%\'*}" ;;
+      *) line="${line%%[[:space:]]#*}"; line="${line%"${line##*[![:space:]]}"}" ;;
+    esac
     printf '%s' "$line"
   }
   DB_DATABASE="$(read_env DB_DATABASE)"
@@ -115,6 +136,12 @@ extract_wordpress() {
   DB_USERNAME="$(wp_define DB_USER)"
   DB_PASSWORD="$(wp_define DB_PASSWORD)"
   DB_HOST="$(wp_define DB_HOST)"
+  # The host's sanitize step needs the site's table prefix ($table_prefix).
+  local prefix_line
+  prefix_line="$(grep -E '^\$table_prefix[[:space:]]*=' "$cfg" | head -n 1)" || prefix_line=""
+  if [ -n "$prefix_line" ]; then
+    WP_TABLE_PREFIX="$(printf '%s' "$prefix_line" | sed -E 's/^\$table_prefix[[:space:]]*=[[:space:]]*//; s/[[:space:]]*;[[:space:]]*$//; s/^.(.*).$/\1/')"
+  fi
   # DB_HOST may be 'host', 'host:port' or 'localhost:/path/to.sock'.
   case "$DB_HOST" in
     *:*)
@@ -216,9 +243,21 @@ apply_db_overrides() {
 if [ "$STRATEGY" = "mysqldump" ]; then
   resolve_app_credentials
   apply_db_overrides
-elif [ "$STRATEGY" = "wp" ] || [ "$STRATEGY" = "drush" ]; then
+elif [ "$STRATEGY" = "wp" ] || [ "$STRATEGY" = "drush" ] || [ "$STRATEGY" = "dump" ]; then
   # Best effort, for the size estimate only; never fatal, never printed.
-  { resolve_app_credentials; apply_db_overrides; } 2>/dev/null || true
+  # Guarded by platform: an unknown platform with a dump: command has no
+  # extractor, and that absence must not fail its run.
+  case "$PLATFORM" in
+    laravel|php|wordpress|drupal)
+      { resolve_app_credentials; apply_db_overrides; } 2>/dev/null || true
+      ;;
+  esac
+fi
+
+# The host's sanitize step needs the WordPress table prefix; report it on a
+# machine-readable line (only the prefix — never credentials).
+if [ "$PLATFORM" = "wordpress" ] && [ -n "$WP_TABLE_PREFIX" ]; then
+  echo "sql-sync-meta: wp_prefix=$WP_TABLE_PREFIX"
 fi
 
 
@@ -264,6 +303,19 @@ _df_last="${_df_out##*$'\n'}"
 _df_kb=""
 read -r _df_fs _df_blocks _df_used _df_kb _df_rest <<< "$_df_last" || true
 case "$_df_kb" in ''|*[!0-9]*) ;; *) TMP_FREE_BYTES=$((_df_kb * 1024)) ;; esac
+
+# A normal run must never be silent about the disk-space check: when the
+# size (or the free space) could not be determined, say so. (Preflight
+# prints its own detailed verdicts below.)
+if [ -z "$PREFLIGHT" ]; then
+  if [ -z "$DB_SIZE_BYTES" ]; then
+    echo "sql-sync (remote): note: the database size could not be estimated — the disk-space check is skipped for this run"
+  elif [ -z "$TMP_FREE_BYTES" ]; then
+    echo "sql-sync (remote): note: the free space in $TMP_DIR could not be determined — the disk-space check is skipped for this run"
+  else
+    echo "sql-sync (remote): disk-space check: the database is ~$(fmt_bytes "$DB_SIZE_BYTES") and $(fmt_bytes "$TMP_FREE_BYTES") is free in $TMP_DIR"
+  fi
+fi
 
 # --- Preflight gate: in preflight mode the run stops here, before any ---------
 # --- dump is executed and before anything is written on this server. -----------
@@ -334,6 +386,28 @@ if [ -n "$DB_SIZE_BYTES" ] && [ -n "$TMP_FREE_BYTES" ] && [ "$TMP_FREE_BYTES" -l
 fi
 
 # --- Execute the dump --------------------------------------------------------------
+# Dumps are staged in a dedicated folder, private to this user (mode 700),
+# with the dump itself at mode 600: a production dump must not sit
+# world-readable in a shared tmp dir. A failed run removes its partial dump
+# via the trap; a successful one also writes a completion marker carrying
+# the dump's byte size, which the host verifies before importing (and
+# requires before fetching an earlier dump with --no-dump).
+
+umask 077
+DUMPS_DIR="$TMP_DIR/ddev-dumps"
+mkdir -p "$DUMPS_DIR"
+chmod 700 "$DUMPS_DIR"
+OUT="$DUMPS_DIR/sql-sync.sql"
+DONE_FILE="$DUMPS_DIR/sql-sync.done"
+rm -f "$DONE_FILE"
+
+DUMP_COMPLETE=""
+cleanup_partial_dump() {
+  if [ -z "$DUMP_COMPLETE" ]; then
+    rm -f "$OUT" "$DONE_FILE"
+  fi
+}
+trap cleanup_partial_dump EXIT
 
 case "$STRATEGY" in
   dump)
@@ -344,7 +418,7 @@ case "$STRATEGY" in
     ;;
   wp)
     echo "sql-sync (remote): using the app's own export: wp db export"
-    wp db export "$OUT"
+    "$WP_BIN" db export "$OUT"
     ;;
   drush)
     echo "sql-sync (remote): using the app's own export: drush sql-dump"
@@ -355,4 +429,9 @@ case "$STRATEGY" in
     MYSQL_PWD="$DB_PASSWORD" mysqldump $EXTRA -u "$DB_USERNAME" --single-transaction --quick --no-tablespaces --skip-lock-tables "$DB_DATABASE" > "$OUT"
     ;;
 esac
+
+DUMP_SIZE="$(wc -c < "$OUT" | tr -d '[:space:]')"
+printf '%s\n' "$DUMP_SIZE" > "$DONE_FILE"
+DUMP_COMPLETE=1
+echo "sql-sync (remote): dump complete: $DUMP_SIZE bytes (completion marker: $DONE_FILE)"
 ls -lh "$OUT"

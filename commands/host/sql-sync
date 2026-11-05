@@ -45,15 +45,17 @@ Options:
                     real production emails and password hashes.
   --dump-dir=<path> Folder for the downloaded dump (overrides local.dir in
                     aliases.yml; default ~/sql-sync).
-  --no-dump         Do not create a new dump; rsync the dump file left on the
-                    server by an earlier run (see --no-sync).
-  --no-sync         Only create the dump on the server and download it;
-                    do not import or sanitize.
+  --no-dump         Do not create a new dump; rsync the dump file left on
+                    the server by an earlier run (see --no-sync). The
+                    dump's completion marker must be present and match its
+                    size, or the run refuses to import.
+  --no-sync         Only create the dump on the server (with its completion
+                    marker); do not download, import or sanitize. A later
+                    --no-dump run fetches it.
   --dry-run         Preflight only: check ssh connectivity, platform, dump
                     strategy, credentials (the password is never shown),
                     database size and disk space, then print the plan.
-                    Takes no dump, imports nothing, and writes nothing on
-                    the server.
+                    Takes no dump and imports nothing.
   -y, --yes         Do not ask for confirmation.
   -h, --help        Show this help.
 EOF
@@ -71,6 +73,23 @@ alias_value() {
   local section="$1" key="$2"
   awk -v section="$section" -v key="$key" '
     function indent_of(s,   n) { n = 0; while (substr(s, n + 1, 1) == " ") n++; return n }
+    function clean(line,   first, cpos) {
+      # YAML value semantics: a quoted scalar keeps everything up to its
+      # closing quote (a # inside quotes is literal); an unquoted value
+      # ends at a " #" inline comment; a value that is only a comment is
+      # empty.
+      sub(/[[:space:]]+$/, "", line)
+      first = substr(line, 1, 1)
+      if (first == "#") return ""
+      if (first == "\"" || first == "\047") {
+        cpos = index(substr(line, 2), first)
+        if (cpos > 0) return substr(line, 1, cpos + 1)
+        return line
+      }
+      sub(/[[:space:]]#.*$/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      return line
+    }
     /^[A-Za-z0-9_-]+:/ {
       current = $0
       sub(/:.*/, "", current)
@@ -86,8 +105,7 @@ alias_value() {
       if (ind == child_indent && $0 ~ "^[[:space:]]+" key ":") {
         line = $0
         sub("^[[:space:]]+" key ":[[:space:]]*", "", line)
-        sub(/[[:space:]]+$/, "", line)
-        print line
+        print clean(line)
         exit
       }
     }
@@ -99,6 +117,19 @@ alias_db_value() {
   local section="$1" key="$2"
   awk -v section="$section" -v key="$key" '
     function indent_of(s,   n) { n = 0; while (substr(s, n + 1, 1) == " ") n++; return n }
+    function clean(line,   first, cpos) {
+      sub(/[[:space:]]+$/, "", line)
+      first = substr(line, 1, 1)
+      if (first == "#") return ""
+      if (first == "\"" || first == "\047") {
+        cpos = index(substr(line, 2), first)
+        if (cpos > 0) return substr(line, 1, cpos + 1)
+        return line
+      }
+      sub(/[[:space:]]#.*$/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      return line
+    }
     /^[A-Za-z0-9_-]+:/ {
       current = $0
       sub(/:.*/, "", current)
@@ -111,7 +142,7 @@ alias_db_value() {
       if ($0 ~ /^[[:space:]]*#/) next
       ind = indent_of($0)
       if (in_db && ind <= db_indent) in_db = 0
-      if (!in_db && $0 ~ /^[[:space:]]+database:[[:space:]]*$/) {
+      if (!in_db && $0 ~ /^[[:space:]]+database:[[:space:]]*(#.*)?$/) {
         in_db = 1
         db_indent = ind
         next
@@ -119,8 +150,7 @@ alias_db_value() {
       if (in_db && ind > db_indent && $0 ~ "^[[:space:]]+" key ":") {
         line = $0
         sub("^[[:space:]]+" key ":[[:space:]]*", "", line)
-        sub(/[[:space:]]+$/, "", line)
-        print line
+        print clean(line)
         exit
       }
     }
@@ -213,6 +243,13 @@ if ! alias_defined "$ALIAS"; then
   fail "unknown alias '@$ALIAS' in .ddev/sql-sync/aliases.yml (aliases defined: ${available:-none})"
 fi
 
+# A duplicated alias must never silently resolve to the first definition —
+# that is the silent-wrong-server failure this tool exists to avoid.
+ALIAS_DEFS="$(grep -cE "^${ALIAS}:" "$ALIASES_FILE")"
+if [ "$ALIAS_DEFS" -gt 1 ]; then
+  fail "alias '@$ALIAS' is defined more than once in .ddev/sql-sync/aliases.yml ($ALIAS_DEFS definitions) — remove the duplicate; aliases must be unique"
+fi
+
 ALIAS_HOST="$(unquote "$(alias_value "$ALIAS" host)")"
 ALIAS_USER="$(unquote "$(alias_value "$ALIAS" user)")"
 ALIAS_ROOT="$(unquote "$(alias_value "$ALIAS" root)")"
@@ -275,7 +312,7 @@ fi
 DUMP_DIR="${DUMP_DIR_CLI:-${LOCAL_DIR:-~/sql-sync}}"
 case "$DUMP_DIR" in
   "~") DUMP_DIR="$HOME" ;;
-  "~/"*) DUMP_DIR="$HOME/${DUMP_DIR#~/}" ;;
+  "~/"*) DUMP_DIR="$HOME/${DUMP_DIR:2}" ;;
 esac
 mkdir -p "$DUMP_DIR"
 
@@ -287,8 +324,16 @@ if [ -n "$ALIAS_JUMP" ]; then
   # -e string and the cleanup ssh call, so the paths cannot drift.
   SSH_OPTIONS="$SSH_OPTIONS -J $ALIAS_JUMP"
 fi
-REMOTE_FILE="$ALIAS_TMP/sql-sync.sql"
+REMOTE_FILE="$ALIAS_TMP/ddev-dumps/sql-sync.sql"
+REMOTE_DONE="$ALIAS_TMP/ddev-dumps/sql-sync.done"
+MARKER_FILE="$DUMP_DIR/.$ALIAS.done"
 DUMP_FILE="$DUMP_DIR/$ALIAS.sql"
+WP_PREFIX=""
+
+# One construction site for the environment the remote half runs with, so
+# the preflight and dump ssh calls below can never drift apart: every
+# SQL_SYNC_* value reaches the remote through this string.
+REMOTE_ENV="SQL_SYNC_ROOT=$(printf '%q' "$ALIAS_ROOT") SQL_SYNC_TMP=$(printf '%q' "$ALIAS_TMP") SQL_SYNC_PLATFORM=$(printf '%q' "$PLATFORM") SQL_SYNC_DUMP_CMD=$(printf '%q' "$DUMP_CMD") SQL_SYNC_DB_NAME=$(printf '%q' "$DB_NAME_OVERRIDE") SQL_SYNC_DB_USERNAME=$(printf '%q' "$DB_USERNAME_OVERRIDE") SQL_SYNC_DB_PASSWORD=$(printf '%q' "$DB_PASSWORD_OVERRIDE") SQL_SYNC_DB_HOST=$(printf '%q' "$DB_HOST_OVERRIDE") SQL_SYNC_DB_PORT=$(printf '%q' "$DB_PORT_OVERRIDE")"
 
 echo "sql-sync: @$ALIAS ($SSH_TARGET:$ALIAS_ROOT, platform: $PLATFORM) -> @self"
 echo "         dump file: $DUMP_FILE"
@@ -327,7 +372,7 @@ if [ "$DRY_RUN" = "true" ]; then
   # $SSH_OPTIONS is intentionally unquoted: it holds separate ssh options.
   REMOTE_OUT=""
   PREFLIGHT_RC=0
-  REMOTE_OUT="$(ssh -o BatchMode=yes -o ConnectTimeout=10 $SSH_OPTIONS "$SSH_TARGET" "SQL_SYNC_ROOT=$(printf '%q' "$ALIAS_ROOT") SQL_SYNC_TMP=$(printf '%q' "$ALIAS_TMP") SQL_SYNC_PLATFORM=$(printf '%q' "$PLATFORM") SQL_SYNC_DUMP_CMD=$(printf '%q' "$DUMP_CMD") SQL_SYNC_DB_NAME=$(printf '%q' "$DB_NAME_OVERRIDE") SQL_SYNC_DB_USERNAME=$(printf '%q' "$DB_USERNAME_OVERRIDE") SQL_SYNC_DB_PASSWORD=$(printf '%q' "$DB_PASSWORD_OVERRIDE") SQL_SYNC_DB_HOST=$(printf '%q' "$DB_HOST_OVERRIDE") SQL_SYNC_DB_PORT=$(printf '%q' "$DB_PORT_OVERRIDE") SQL_SYNC_PREFLIGHT=1 bash -s" < "$ADDON_DIR/remote-dump.sh" 2>&1)" || PREFLIGHT_RC=$?
+  REMOTE_OUT="$(ssh -o BatchMode=yes -o ConnectTimeout=10 $SSH_OPTIONS "$SSH_TARGET" "$REMOTE_ENV SQL_SYNC_PREFLIGHT=1 bash -s" < "$ADDON_DIR/remote-dump.sh" 2>&1)" || PREFLIGHT_RC=$?
   if [ "$PREFLIGHT_RC" -eq 0 ]; then
     echo "preflight: ok: ssh connectivity to $SSH_TARGET (BatchMode, 10s timeout)"
   else
@@ -347,14 +392,14 @@ if [ "$DRY_RUN" = "true" ]; then
     if ddev drush --version >/dev/null 2>&1; then
       SANITIZE_PLAN="yes — drush sql-sanitize"
     else
-      SANITIZE_PLAN="none available (drupal without drush or a sanitize file); a real run would import unsanitized"
+      SANITIZE_PLAN="none available (drupal without drush or a sanitize file); a real run would stop with an error after import"
     fi
   elif [ "$PLATFORM" = "laravel" ]; then
     SANITIZE_PLAN="yes — built-in laravel sanitize (users table)"
   elif [ "$PLATFORM" = "wordpress" ]; then
-    SANITIZE_PLAN="yes — built-in wordpress sanitize (wp_users table)"
+    SANITIZE_PLAN="yes — built-in wordpress sanitize (the site's users table, prefix-aware)"
   else
-    SANITIZE_PLAN="none available for platform '$PLATFORM'; a real run would import unsanitized"
+    SANITIZE_PLAN="none available for platform '$PLATFORM'; a real run would stop with an error after import"
   fi
   echo "plan: the dump would be downloaded to $DUMP_FILE"
   echo "plan: sanitize after import: $SANITIZE_PLAN"
@@ -372,57 +417,124 @@ else
   # The remote half of the add-on ships as an installed file and is piped to
   # the server over ssh. The SQL_SYNC_DB_* values (if any) come from the
   # alias's database: block and override the app's own config field by field.
+  # Output is captured (and replayed) so the run can stop cleanly before
+  # downloading anything when the dump fails, and so it can read the
+  # remote's meta lines (the WordPress table prefix, for sanitize).
   # $SSH_OPTIONS is intentionally unquoted: it holds separate ssh options.
-  ssh $SSH_OPTIONS "$SSH_TARGET" "SQL_SYNC_ROOT=$(printf '%q' "$ALIAS_ROOT") SQL_SYNC_TMP=$(printf '%q' "$ALIAS_TMP") SQL_SYNC_PLATFORM=$(printf '%q' "$PLATFORM") SQL_SYNC_DUMP_CMD=$(printf '%q' "$DUMP_CMD") SQL_SYNC_DB_NAME=$(printf '%q' "$DB_NAME_OVERRIDE") SQL_SYNC_DB_USERNAME=$(printf '%q' "$DB_USERNAME_OVERRIDE") SQL_SYNC_DB_PASSWORD=$(printf '%q' "$DB_PASSWORD_OVERRIDE") SQL_SYNC_DB_HOST=$(printf '%q' "$DB_HOST_OVERRIDE") SQL_SYNC_DB_PORT=$(printf '%q' "$DB_PORT_OVERRIDE") bash -s" < "$ADDON_DIR/remote-dump.sh"
+  STEP1_OUT=""
+  STEP1_RC=0
+  STEP1_OUT="$(ssh $SSH_OPTIONS "$SSH_TARGET" "$REMOTE_ENV bash -s" < "$ADDON_DIR/remote-dump.sh" 2>&1)" || STEP1_RC=$?
+  [ -n "$STEP1_OUT" ] && printf '%s\n' "$STEP1_OUT"
+  if [ "$STEP1_RC" -ne 0 ]; then
+    fail "the dump step failed on $SSH_TARGET (exit $STEP1_RC); nothing was downloaded or imported"
+  fi
+  WP_PREFIX="$(printf '%s\n' "$STEP1_OUT" | sed -n 's/^sql-sync-meta: wp_prefix=//p' | head -n 1)"
+  case "$WP_PREFIX" in *[!A-Za-z0-9_]*) WP_PREFIX="" ;; esac
 fi
 
 if [ "$NO_SYNC" = "true" ]; then
-  echo "==> --no-sync: dump left on $SSH_TARGET at $REMOTE_FILE; nothing downloaded or imported."
+  echo "==> --no-sync: dump left on $SSH_TARGET at $REMOTE_FILE (with its completion marker); nothing downloaded or imported."
+  echo "    Fetch and import it later with: ddev sql-sync @$ALIAS @self --no-dump"
   exit 0
 fi
 
-# --- Step 2: rsync the dump down ----------------------------------------------
+# --- Step 2: rsync the dump down, verified against its completion marker -------
 
 echo "==> [2/4] Downloading dump to $DUMP_FILE ..."
 # $SSH_OPTIONS is intentionally unquoted: it holds separate ssh options.
-rsync -az -e "ssh $SSH_OPTIONS" "$SSH_TARGET:$REMOTE_FILE" "$DUMP_FILE"
+rsync -az -e "ssh $SSH_OPTIONS" "$SSH_TARGET:$REMOTE_FILE" "$DUMP_FILE" \
+  || fail "failed to download the dump from $SSH_TARGET:$REMOTE_FILE (for --no-dump runs: an earlier --no-sync run must have left one there)"
+rsync -az -e "ssh $SSH_OPTIONS" "$SSH_TARGET:$REMOTE_DONE" "$MARKER_FILE" \
+  || fail "the dump's completion marker ($REMOTE_DONE) could not be downloaded — the dump on the server may be incomplete; refusing to import. Re-run without --no-dump to create a fresh dump."
+EXPECTED_SIZE="$(tr -d '[:space:]' < "$MARKER_FILE")"
+case "$EXPECTED_SIZE" in
+  ''|*[!0-9]*) fail "the dump's completion marker is unreadable ('$EXPECTED_SIZE'); refusing to import" ;;
+esac
+ACTUAL_SIZE="$(wc -c < "$DUMP_FILE" | tr -d '[:space:]')"
+if [ "$ACTUAL_SIZE" != "$EXPECTED_SIZE" ]; then
+  fail "the downloaded dump is $ACTUAL_SIZE bytes but the server's completion marker says $EXPECTED_SIZE — the transfer is incomplete; refusing to import"
+fi
+rm -f "$MARKER_FILE"
+echo "    verified: $ACTUAL_SIZE bytes, matching the server's completion marker"
 
-echo "==> Removing the remote temp file ..."
-ssh $SSH_OPTIONS "$SSH_TARGET" "rm -f $(printf '%q' "$REMOTE_FILE")"
+# A gzipped dump keeps a .gz name: ddev import-db picks the format by
+# extension, so gzip bytes in a .sql file would fail the import.
+if [ "$(head -c 2 "$DUMP_FILE" | od -An -tx1 | tr -d ' \n')" = "1f8b" ]; then
+  mv "$DUMP_FILE" "$DUMP_FILE.gz"
+  DUMP_FILE="$DUMP_FILE.gz"
+  echo "    the dump is gzipped; importing it as $DUMP_FILE"
+fi
 
 # --- Step 3: import ------------------------------------------------------------
 
 echo "==> [3/4] Importing into this DDEV project ..."
-ddev import-db --file="$DUMP_FILE"
+if ! ddev import-db --file="$DUMP_FILE"; then
+  echo "sql-sync: the import FAILED — the local database may be incomplete." >&2
+  echo "The dump has been kept on the server at $SSH_TARGET:$REMOTE_FILE (marker: $REMOTE_DONE)" >&2
+  echo "and locally at $DUMP_FILE. Fix the problem, then fetch and import it with:" >&2
+  echo "  ddev sql-sync @$ALIAS @self --no-dump" >&2
+  exit 1
+fi
+
+echo "==> Removing the remote temp files ..."
+ssh $SSH_OPTIONS "$SSH_TARGET" "rm -f $(printf '%q' "$REMOTE_FILE") $(printf '%q' "$REMOTE_DONE")"
 
 # --- Step 4: sanitize ------------------------------------------------------------
 
 echo "==> [4/4] Sanitize ..."
+SANITIZED=""
 if [ "$SANITIZE" != "true" ]; then
   echo "    SKIPPED (--no-sanitize). WARNING: the local database now contains real"
   echo "    production user emails and password hashes. Handle the dump in"
   echo "    $DUMP_DIR accordingly and delete it when you are done."
 elif [ "$PLATFORM" = "drupal" ] && [ -z "$SANITIZE_OVERRIDE" ] && ddev drush --version >/dev/null 2>&1; then
   # Drupal hashes passwords in PHP, so there is no bundled SQL sanitize;
-  # use the app's own tool when the project has Drush.
+  # use the app's own tool when the project has Drush. (An alias sanitize:
+  # file, when set, wins over this — see the next branch.)
   ddev drush sql-sanitize --yes
+  SANITIZED=1
   echo "    Sanitized with Drush sql-sanitize (user emails and passwords scrubbed)."
 elif [ -n "$SANITIZE_OVERRIDE" ]; then
   ddev mysql < "$SANITIZE_OVERRIDE"
+  SANITIZED=1
   echo "    Sanitized with the alias's sanitize file: $SANITIZE_KEY"
 elif [ "$PLATFORM" = "laravel" ] && [ -f "$ADDON_DIR/sanitize-laravel.sql" ]; then
   if ddev mysql -N -e "SHOW TABLES LIKE 'users';" | grep -qx "users"; then
     ddev mysql < "$ADDON_DIR/sanitize-laravel.sql"
+    SANITIZED=1
     echo "    Sanitized: user emails are now user<id>@example.test and passwords are 'password'."
   else
-    echo "    No 'users' table in the imported database — sanitize skipped, nothing was changed."
+    echo "    No 'users' table in the imported database — sanitize did NOT run."
   fi
 elif [ "$PLATFORM" = "wordpress" ] && [ -f "$ADDON_DIR/sanitize-wordpress.sql" ]; then
-  if ddev mysql -N -e "SHOW TABLES LIKE 'wp_users';" | grep -qx "wp_users"; then
-    ddev mysql < "$ADDON_DIR/sanitize-wordpress.sql"
-    echo "    Sanitized: user emails are now user<id>@example.test and passwords are 'password'."
+  # The users table carries the site's table prefix: from the server when
+  # step 1 reported it, otherwise detected in the imported database (the
+  # prefix whose <prefix>users and <prefix>options both exist).
+  WP_USERS_TABLE=""
+  if [ -n "$WP_PREFIX" ]; then
+    if ddev mysql -N -e "SHOW TABLES LIKE '${WP_PREFIX}users';" | grep -qx "${WP_PREFIX}users"; then
+      WP_USERS_TABLE="${WP_PREFIX}users"
+    fi
   else
-    echo "    No 'wp_users' table in the imported database — sanitize skipped, nothing was changed."
+    ALL_TABLES="$(ddev mysql -N -e "SHOW TABLES;")"
+    for t in $ALL_TABLES; do
+      case "$t" in
+        *users)
+          pfx="${t%users}"
+          if printf '%s\n' "$ALL_TABLES" | grep -qx "${pfx}options"; then
+            WP_USERS_TABLE="$t"
+            break
+          fi
+          ;;
+      esac
+    done
+  fi
+  if [ -n "$WP_USERS_TABLE" ]; then
+    sed "s/__PREFIX__/${WP_USERS_TABLE%users}/g" "$ADDON_DIR/sanitize-wordpress.sql" | ddev mysql
+    SANITIZED=1
+    echo "    Sanitized: user emails are now user<id>@example.test and passwords are 'password' (table: $WP_USERS_TABLE)."
+  else
+    echo "    No WordPress users table found in the imported database — sanitize did NOT run."
   fi
 elif [ "$PLATFORM" = "drupal" ]; then
   echo "    No sanitize ran: Drupal hashes passwords in PHP, so there is no bundled"
@@ -432,6 +544,18 @@ elif [ "$PLATFORM" = "drupal" ]; then
 else
   echo "    No sanitize available for platform '$PLATFORM': set a 'sanitize:' SQL file"
   echo "    in the alias to enable one. The imported database has NOT been sanitized."
+fi
+
+# Sanitize is a safety promise, not a best effort: when it was requested
+# (the default) but nothing could be applied, the run must not report
+# success over an unsanitized database.
+if [ "$SANITIZE" = "true" ] && [ -z "$SANITIZED" ]; then
+  echo "" >&2
+  echo "sql-sync: ERROR: the import completed WITHOUT sanitize." >&2
+  echo "The local database now holds LIVE production user emails and password hashes." >&2
+  echo "Sanitize it yourself, set a 'sanitize:' file in the alias, or re-run with" >&2
+  echo "--no-sanitize to accept an unsanitized import explicitly." >&2
+  exit 1
 fi
 
 echo "sql-sync: done. @$ALIAS is now this project's database."

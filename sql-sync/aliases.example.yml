@@ -1,4 +1,4 @@
-# #ddev-generated: This example file is managed by the sql-sync add-on (atj4me/ddev-sql-sync) and may be overwritten on add-on updates. Your real configuration lives in aliases.yml (same folder), which the add-on never overwrites or removes.
+# #ddev-generated: aliases.example.yml is managed by the sql-sync add-on (atj4me/ddev-sql-sync) and may be overwritten on add-on updates. The aliases.yml created from it is yours — the add-on never overwrites or removes that file.
 #
 # Copy this file to aliases.yml and fill in your servers:
 #   cp .ddev/sql-sync/aliases.example.yml .ddev/sql-sync/aliases.yml
@@ -58,9 +58,9 @@ prod:
   #   host: 127.0.0.1
   #   port: 3306
   # Optional: a project-local SQL file (relative to the project root) to
-  # sanitize with after import, instead of the built-in sanitize. For drupal
-  # this is the fallback when the project has no Drush (ddev drush
-  # sql-sanitize is preferred there).
+  # sanitize with after import. When set, this file is used INSTEAD of the
+  # built-in sanitize on every platform — including drupal, where it wins
+  # over ddev drush sql-sanitize (explicit per-alias config wins).
   # sanitize: .ddev/sql-sync/my-sanitize.sql
 
 # staging:
