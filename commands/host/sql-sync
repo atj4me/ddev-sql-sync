@@ -23,8 +23,8 @@ ssh + a dump on the remote, rsync the dump down, ddev import-db, then sanitize.
                     leading @ (e.g. @prod). The alias gives the ssh host and
                     the app path on the server. Its platform defaults to this
                     project's DDEV type (.ddev/config.yaml) and can be set
-                    per alias with the platform: key (laravel, wordpress or
-                    drupal). The platform decides how the dump is made on the
+                    per alias with the platform: key (laravel, wordpress,
+                    drupal or php). The platform decides how the dump is made on the
                     server: the app's own export tool when it has one
                     (WP-CLI / Drush), otherwise mysqldump with credentials
                     from the alias's database: block and/or the app's own
@@ -227,6 +227,8 @@ ALIAS_TMP="${ALIAS_TMP:-/tmp}"
 
 # Platform: the alias's platform: key wins; otherwise this project's own
 # DDEV type (the local project is the same application as production).
+# A php, unrecognised or missing DDEV type resolves to the generic php
+# platform.
 if [ -z "$PLATFORM" ]; then
   DDEV_TYPE=""
   if [ -f "$APPROOT/.ddev/config.yaml" ]; then
@@ -237,15 +239,15 @@ if [ -z "$PLATFORM" ]; then
     laravel) PLATFORM="laravel" ;;
     wordpress) PLATFORM="wordpress" ;;
     drupal|drupal6|drupal7|drupal8|drupal9|drupal10|drupal11) PLATFORM="drupal" ;;
-    *) PLATFORM="laravel" ;;
+    *) PLATFORM="php" ;;
   esac
 fi
 
 case "$PLATFORM" in
-  laravel|wordpress|drupal) ;;
+  laravel|wordpress|drupal|php) ;;
   *)
     if [ -z "$DUMP_CMD" ]; then
-      fail "alias '@$ALIAS' has unknown platform '$PLATFORM' (expected laravel, wordpress or drupal — or set a 'dump:' command in the alias, which works for any platform)"
+      fail "alias '@$ALIAS' has unknown platform '$PLATFORM' (expected laravel, wordpress, drupal or php — or set a 'dump:' command in the alias, which works for any platform)"
     fi
     ;;
 esac

@@ -43,7 +43,7 @@ Optional per-alias keys:
 
 | Key | Purpose |
 | --- | --- |
-| `platform:` | `laravel`, `wordpress` or `drupal`. Defaults to this project's DDEV type from `.ddev/config.yaml`, so usually unset. |
+| `platform:` | `laravel`, `wordpress`, `drupal` or `php`. Resolved per alias: this key, else the project's DDEV type from `.ddev/config.yaml` (laravel/wordpress/drupal* map to themselves), else `php` — DDEV's generic type, an unrecognised type, and no type at all all land on the generic php platform. Usually unset. |
 | `options:` | Extra ssh options, e.g. `options: -i ~/.ssh/prod_key`. |
 | `jump:` | Optional jump host (bastion) passed to ssh `-J` (ProxyJump) on every connection, e.g. `jump: bastion.example.com`. Prefer `ProxyJump` in `~/.ssh/config` — that is the durable place, and every tool benefits. This key is only for one-off syncs where you don't want to touch your ssh config. |
 | `dump:` | A command on the server whose stdout **is** the dump (e.g. `dump: drush sql-dump`). Replaces both dump strategies below — works for any platform. |
@@ -117,6 +117,7 @@ Platform notes:
 
 - **Laravel / any `.env` app** — credentials from `<root>/.env`. Bedrock-style WordPress also fits here (set `platform: laravel`).
 - **WordPress (classic)** — credentials from the `DB_*` defines in `<root>/wp-config.php` (or one level up, as WordPress allows).
+- **PHP (generic)** — DDEV's generic `php` type, and the terminal default when nothing else matches. No app-native export exists, so it always uses mysqldump; credentials come from `<root>/.env` if the app has one, merged under the alias's `database:` block — for a generic app that block is the expected primary source. No bundled sanitize: a `sanitize:` file is honoured, otherwise the run reports that no sanitize ran.
 - **Drupal** — dump via Drush when available; otherwise extraction reads the default `$databases` entry from `settings.php` with a small PHP snippet on the server (best-effort: a settings file that pulls credentials from the environment may not yield them — then use a `dump:` override such as `dump: drush sql-dump`, or pin a `database:` block).
 
 ## Sanitize

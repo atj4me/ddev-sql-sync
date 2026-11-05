@@ -19,9 +19,9 @@ ROOT="${SQL_SYNC_ROOT:?sql-sync: SQL_SYNC_ROOT is not set}"
 TMP_DIR="${SQL_SYNC_TMP:-/tmp}"
 PLATFORM="${SQL_SYNC_PLATFORM:-}"
 if [ -z "$PLATFORM" ]; then
-  # No platform supplied (direct/manual use): assume laravel, never silently.
-  PLATFORM="laravel"
-  echo "sql-sync (remote): no platform specified (SQL_SYNC_PLATFORM unset); assuming laravel"
+  # No platform supplied (direct/manual use): assume php, never silently.
+  PLATFORM="php"
+  echo "sql-sync (remote): no platform specified (SQL_SYNC_PLATFORM unset); assuming php"
 fi
 echo "sql-sync (remote): platform: $PLATFORM"
 DUMP_CMD="${SQL_SYNC_DUMP_CMD:-}"
@@ -203,9 +203,10 @@ PHP
 
 case "$PLATFORM" in
   laravel) extract_env ;;
+  php) extract_env ;;
   wordpress) extract_wordpress ;;
   drupal) extract_drupal ;;
-  *) fail "unknown platform '$PLATFORM' (expected laravel, wordpress or drupal — or set a 'dump:' command in the alias)" ;;
+  *) fail "unknown platform '$PLATFORM' (expected laravel, wordpress, drupal or php — or set a 'dump:' command in the alias)" ;;
 esac
 
 # Explicit values from the alias's database: block win, field by field.

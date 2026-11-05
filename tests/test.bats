@@ -426,7 +426,7 @@ FIXEOF
   assert_output --partial "pw: drupalpass"
 }
 
-@test "remote dump (host invocation form): no platform prints the laravel-assumption notice" {
+@test "remote dump (host invocation form): no platform prints the php-assumption notice" {
   set -eu -o pipefail
   make_stub_mysqldump
   FIXTURE_DIR="$(mktemp -d)"
@@ -438,15 +438,69 @@ DB_HOST=127.0.0.1
 FIXEOF
   export SQL_SYNC_TEST_CAPTURE="${FIXTURE_DIR}/capture.txt"
   # No SQL_SYNC_PLATFORM in the environment at all: the script may assume
-  # laravel, but it must say so — a silent assumption sends wordpress and
+  # php, but it must say so — a silent assumption sends wordpress and
   # drupal syncs down the .env extractor with no sign in the output.
   run_remote_host_form "${STUB_DIR}:/usr/bin:/bin" "${FIXTURE_DIR}" ""
   assert_success
   assert_output --partial "no platform specified"
-  assert_output --partial "platform: laravel"
+  assert_output --partial "platform: php"
   run cat "${SQL_SYNC_TEST_CAPTURE}"
   assert_output --partial "args: -h 127.0.0.1 -u fixtureuser"
   assert_output --partial "pw: fixturepass"
+
+  # With the platform given explicitly as php, the same .env extraction
+  # runs and there is no assumption notice
+  run_remote_host_form "${STUB_DIR}:/usr/bin:/bin" "${FIXTURE_DIR}" php
+  assert_success
+  assert_output --partial "platform: php"
+  refute_output --partial "no platform specified"
+  run cat "${SQL_SYNC_TEST_CAPTURE}"
+  assert_output --partial "args: -h 127.0.0.1 -u fixtureuser"
+  assert_output --partial "pw: fixturepass"
+}
+
+@test "host command: platform resolution falls back to the DDEV type, then php" {
+  set -eu -o pipefail
+  make_fake_project
+  cat > "${FAKE_DIR}/.ddev/sql-sync/aliases.yml" <<FIXEOF
+local:
+  dir: ${FAKE_DIR}/dumps
+
+prod:
+  host: app.example.com
+  user: deploy
+  root: /var/www/example
+FIXEOF
+
+  # A generic DDEV php project type resolves to the php platform
+  printf 'type: php\n' > "${FAKE_DIR}/.ddev/config.yaml"
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod -y --no-sanitize
+  assert_success
+  run cat "${SQL_SYNC_TEST_SSH_CAPTURE}"
+  assert_output --partial "SQL_SYNC_PLATFORM=php"
+
+  # No config.yaml at all also lands on php
+  rm -f "${FAKE_DIR}/.ddev/config.yaml" "${SQL_SYNC_TEST_SSH_CAPTURE}"
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod -y --no-sanitize
+  assert_success
+  run cat "${SQL_SYNC_TEST_SSH_CAPTURE}"
+  assert_output --partial "SQL_SYNC_PLATFORM=php"
+
+  # An unrecognised DDEV type lands on php too
+  printf 'type: backdrop\n' > "${FAKE_DIR}/.ddev/config.yaml"
+  rm -f "${SQL_SYNC_TEST_SSH_CAPTURE}"
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod -y --no-sanitize
+  assert_success
+  run cat "${SQL_SYNC_TEST_SSH_CAPTURE}"
+  assert_output --partial "SQL_SYNC_PLATFORM=php"
+
+  # A recognised type still resolves to itself
+  printf 'type: laravel\n' > "${FAKE_DIR}/.ddev/config.yaml"
+  rm -f "${SQL_SYNC_TEST_SSH_CAPTURE}"
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod -y --no-sanitize
+  assert_success
+  run cat "${SQL_SYNC_TEST_SSH_CAPTURE}"
+  assert_output --partial "SQL_SYNC_PLATFORM=laravel"
 }
 
 # bats test_tags=release
