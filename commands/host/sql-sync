@@ -29,6 +29,10 @@ ssh + a dump on the remote, rsync the dump down, ddev import-db, then sanitize.
                     (WP-CLI / Drush), otherwise mysqldump with credentials
                     from the alias's database: block and/or the app's own
                     config (.env, wp-config.php, settings.php).
+                    An alias may set a jump: key (a bastion host) that is
+                    passed to ssh -J for this sync. Prefer ProxyJump in
+                    ~/.ssh/config for regular use; the jump: key is for
+                    one-off syncs.
   <target>          Only @self (this DDEV project) is supported; may be omitted.
 
 Options:
@@ -204,6 +208,7 @@ ALIAS_USER="$(unquote "$(alias_value "$ALIAS" user)")"
 ALIAS_ROOT="$(unquote "$(alias_value "$ALIAS" root)")"
 ALIAS_TMP="$(unquote "$(alias_value "$ALIAS" tmp)")"
 ALIAS_OPTIONS="$(alias_value "$ALIAS" options)"
+ALIAS_JUMP="$(unquote "$(alias_value "$ALIAS" jump)")"
 PLATFORM="$(unquote "$(alias_value "$ALIAS" platform)")"
 DUMP_CMD="$(unquote "$(alias_value "$ALIAS" dump)")"
 SANITIZE_KEY="$(unquote "$(alias_value "$ALIAS" sanitize)")"
@@ -265,6 +270,11 @@ mkdir -p "$DUMP_DIR"
 SSH_TARGET="$ALIAS_HOST"
 [ -n "$ALIAS_USER" ] && SSH_TARGET="$ALIAS_USER@$ALIAS_HOST"
 SSH_OPTIONS="$ALIAS_OPTIONS"
+if [ -n "$ALIAS_JUMP" ]; then
+  # Composed here only: SSH_OPTIONS feeds the dump ssh call, the rsync
+  # -e string and the cleanup ssh call, so the paths cannot drift.
+  SSH_OPTIONS="$SSH_OPTIONS -J $ALIAS_JUMP"
+fi
 REMOTE_FILE="$ALIAS_TMP/sql-sync.sql"
 DUMP_FILE="$DUMP_DIR/$ALIAS.sql"
 

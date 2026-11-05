@@ -289,6 +289,74 @@ FIXEOF
   assert_output --partial "pw: drupalpass"
 }
 
+# Build a minimal fake project layout so the host command can run outside
+# DDEV, with ssh, rsync and ddev stubbed on PATH recording their arguments.
+make_fake_project() {
+  FAKE_DIR="$(mktemp -d)"
+  STUB_DIR="$(mktemp -d)"
+  mkdir -p "${FAKE_DIR}/.ddev/commands/host" "${FAKE_DIR}/.ddev/sql-sync"
+  cp "${DIR}/commands/host/sql-sync" "${FAKE_DIR}/.ddev/commands/host/sql-sync"
+  cp "${DIR}/sql-sync/remote-dump.sh" "${DIR}/sql-sync/sanitize-laravel.sql" "${DIR}/sql-sync/sanitize-wordpress.sql" "${FAKE_DIR}/.ddev/sql-sync/"
+  cat > "${STUB_DIR}/ssh" <<'STUBEOF'
+#!/usr/bin/env bash
+printf 'ssh: %s\n' "$*" >> "${SQL_SYNC_TEST_SSH_CAPTURE}"
+exit 0
+STUBEOF
+  cat > "${STUB_DIR}/rsync" <<'STUBEOF'
+#!/usr/bin/env bash
+printf 'rsync: %s\n' "$*" >> "${SQL_SYNC_TEST_RSYNC_CAPTURE}"
+exit 0
+STUBEOF
+  cat > "${STUB_DIR}/ddev" <<'STUBEOF'
+#!/usr/bin/env bash
+exit 0
+STUBEOF
+  chmod +x "${STUB_DIR}/ssh" "${STUB_DIR}/rsync" "${STUB_DIR}/ddev"
+  export SQL_SYNC_TEST_SSH_CAPTURE="${FAKE_DIR}/ssh-capture.txt"
+  export SQL_SYNC_TEST_RSYNC_CAPTURE="${FAKE_DIR}/rsync-capture.txt"
+}
+
+@test "host command: jump host reaches ssh and rsync, absent without jump:" {
+  set -eu -o pipefail
+  make_fake_project
+  cat > "${FAKE_DIR}/.ddev/sql-sync/aliases.yml" <<FIXEOF
+local:
+  dir: ${FAKE_DIR}/dumps
+
+prod:
+  host: app.example.com
+  user: deploy
+  root: /var/www/example
+  jump: bastion.example.com
+FIXEOF
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod -y --no-sanitize
+  assert_success
+  # Both ssh calls (dump + cleanup) carry the -J value
+  run grep -c -- "-J bastion.example.com" "${SQL_SYNC_TEST_SSH_CAPTURE}"
+  assert_success
+  assert_output "2"
+  run cat "${SQL_SYNC_TEST_RSYNC_CAPTURE}"
+  assert_output --partial "-J bastion.example.com"
+
+  # The same alias without the jump: key: no -J anywhere
+  cat > "${FAKE_DIR}/.ddev/sql-sync/aliases.yml" <<FIXEOF
+local:
+  dir: ${FAKE_DIR}/dumps
+
+prod:
+  host: app.example.com
+  user: deploy
+  root: /var/www/example
+FIXEOF
+  rm -f "${SQL_SYNC_TEST_SSH_CAPTURE}" "${SQL_SYNC_TEST_RSYNC_CAPTURE}"
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod -y --no-sanitize
+  assert_success
+  run grep -- "-J" "${SQL_SYNC_TEST_SSH_CAPTURE}"
+  assert_failure
+  run grep -- "-J" "${SQL_SYNC_TEST_RSYNC_CAPTURE}"
+  assert_failure
+}
+
 # bats test_tags=release
 @test "install from release" {
   set -eu -o pipefail

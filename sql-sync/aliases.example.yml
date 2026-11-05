@@ -38,6 +38,12 @@ prod:
   tmp: /tmp
   # Optional: extra ssh options, e.g. options: -i ~/.ssh/prod_key
   # options:
+  # Optional: a jump host (bastion) for this alias, passed to ssh -J
+  # (ProxyJump) on every connection. Prefer setting ProxyJump in
+  # ~/.ssh/config instead — that is the durable place, and every tool
+  # benefits. This key is only for one-off syncs where you don't want
+  # to touch your ssh config.
+  # jump: bastion.example.com
   # Optional escape hatch: a command on the server whose stdout IS the dump.
   # When set it replaces both strategies above — works for any platform.
   # dump: drush sql-dump

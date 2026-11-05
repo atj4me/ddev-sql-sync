@@ -45,6 +45,7 @@ Optional per-alias keys:
 | --- | --- |
 | `platform:` | `laravel`, `wordpress` or `drupal`. Defaults to this project's DDEV type from `.ddev/config.yaml`, so usually unset. |
 | `options:` | Extra ssh options, e.g. `options: -i ~/.ssh/prod_key`. |
+| `jump:` | Optional jump host (bastion) passed to ssh `-J` (ProxyJump) on every connection, e.g. `jump: bastion.example.com`. Prefer `ProxyJump` in `~/.ssh/config` — that is the durable place, and every tool benefits. This key is only for one-off syncs where you don't want to touch your ssh config. |
 | `dump:` | A command on the server whose stdout **is** the dump (e.g. `dump: drush sql-dump`). Replaces both dump strategies below — works for any platform. |
 | `database:` | Explicit database credentials (see below). |
 | `sanitize:` | Path (relative to the project root) to your own SQL file to sanitize with after import. |
