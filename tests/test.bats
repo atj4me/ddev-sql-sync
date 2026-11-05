@@ -357,6 +357,98 @@ FIXEOF
   assert_failure
 }
 
+# Invoke remote-dump.sh exactly as commands/host/sql-sync does over ssh:
+# the full SQL_SYNC_* environment the ssh command string carries, with the
+# script itself fed to bash -s on stdin rather than run as a file. $1 is the
+# PATH, $2 the fixture root, $3 the platform (empty: caller passes none).
+run_remote_host_form() {
+  if [ -n "$3" ]; then
+    run env PATH="$1" SQL_SYNC_ROOT="$2" SQL_SYNC_TMP="$2" SQL_SYNC_PLATFORM="$3" SQL_SYNC_DUMP_CMD= SQL_SYNC_DB_NAME= SQL_SYNC_DB_USERNAME= SQL_SYNC_DB_PASSWORD= SQL_SYNC_DB_HOST= SQL_SYNC_DB_PORT= bash -s < "${DIR}/sql-sync/remote-dump.sh"
+  else
+    run env PATH="$1" SQL_SYNC_ROOT="$2" SQL_SYNC_TMP="$2" SQL_SYNC_DUMP_CMD= SQL_SYNC_DB_NAME= SQL_SYNC_DB_USERNAME= SQL_SYNC_DB_PASSWORD= SQL_SYNC_DB_HOST= SQL_SYNC_DB_PORT= bash -s < "${DIR}/sql-sync/remote-dump.sh"
+  fi
+}
+
+@test "remote dump (host invocation form): wordpress platform reaches the wp-config extractor" {
+  set -eu -o pipefail
+  make_stub_mysqldump
+  FIXTURE_DIR="$(mktemp -d)"
+  cat > "${FIXTURE_DIR}/wp-config.php" <<'FIXEOF'
+<?php
+define( 'DB_NAME', 'wpdb' );
+define( 'DB_USER', 'wpuser' );
+define( 'DB_PASSWORD', 'wppass' );
+define( 'DB_HOST', 'localhost' );
+FIXEOF
+  export SQL_SYNC_TEST_CAPTURE="${FIXTURE_DIR}/capture.txt"
+  # No wp on this PATH, so the run must land on the mysqldump fallback, and
+  # the platform carried in the environment must pick the wp-config
+  # extractor (not the .env one).
+  run_remote_host_form "${STUB_DIR}:/usr/bin:/bin" "${FIXTURE_DIR}" wordpress
+  assert_success
+  assert_output --partial "platform: wordpress"
+  assert_output --partial "using mysqldump"
+  run cat "${SQL_SYNC_TEST_CAPTURE}"
+  assert_output --partial "args: -u wpuser"
+  assert_output --partial "wpdb"
+  assert_output --partial "pw: wppass"
+}
+
+@test "remote dump (host invocation form): drupal platform reaches the settings.php extractor" {
+  set -eu -o pipefail
+  if ! command -v php >/dev/null 2>&1; then
+    skip "php is not available in this environment"
+  fi
+  make_stub_mysqldump
+  FIXTURE_DIR="$(mktemp -d)"
+  mkdir -p "${FIXTURE_DIR}/sites/default"
+  cat > "${FIXTURE_DIR}/sites/default/settings.php" <<'FIXEOF'
+<?php
+$databases['default']['default'] = [
+  'database' => 'drupaldb',
+  'username' => 'drupaluser',
+  'password' => 'drupalpass',
+  'host' => 'localhost',
+  'port' => '',
+  'driver' => 'mysql',
+];
+FIXEOF
+  export SQL_SYNC_TEST_CAPTURE="${FIXTURE_DIR}/capture.txt"
+  # No drush on this PATH (only the stub dir is added), so the run must land
+  # on the mysqldump fallback with credentials from settings.php.
+  run_remote_host_form "${STUB_DIR}:${PATH}" "${FIXTURE_DIR}" drupal
+  assert_success
+  assert_output --partial "platform: drupal"
+  assert_output --partial "using mysqldump"
+  run cat "${SQL_SYNC_TEST_CAPTURE}"
+  assert_output --partial "args: -u drupaluser"
+  assert_output --partial "drupaldb"
+  assert_output --partial "pw: drupalpass"
+}
+
+@test "remote dump (host invocation form): no platform prints the laravel-assumption notice" {
+  set -eu -o pipefail
+  make_stub_mysqldump
+  FIXTURE_DIR="$(mktemp -d)"
+  cat > "${FIXTURE_DIR}/.env" <<'FIXEOF'
+DB_DATABASE=fixturedb
+DB_USERNAME=fixtureuser
+DB_PASSWORD=fixturepass
+DB_HOST=127.0.0.1
+FIXEOF
+  export SQL_SYNC_TEST_CAPTURE="${FIXTURE_DIR}/capture.txt"
+  # No SQL_SYNC_PLATFORM in the environment at all: the script may assume
+  # laravel, but it must say so — a silent assumption sends wordpress and
+  # drupal syncs down the .env extractor with no sign in the output.
+  run_remote_host_form "${STUB_DIR}:/usr/bin:/bin" "${FIXTURE_DIR}" ""
+  assert_success
+  assert_output --partial "no platform specified"
+  assert_output --partial "platform: laravel"
+  run cat "${SQL_SYNC_TEST_CAPTURE}"
+  assert_output --partial "args: -h 127.0.0.1 -u fixtureuser"
+  assert_output --partial "pw: fixturepass"
+}
+
 # bats test_tags=release
 @test "install from release" {
   set -eu -o pipefail

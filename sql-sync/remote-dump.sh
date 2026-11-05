@@ -17,7 +17,13 @@ set -euo pipefail
 
 ROOT="${SQL_SYNC_ROOT:?sql-sync: SQL_SYNC_ROOT is not set}"
 TMP_DIR="${SQL_SYNC_TMP:-/tmp}"
-PLATFORM="${SQL_SYNC_PLATFORM:-laravel}"
+PLATFORM="${SQL_SYNC_PLATFORM:-}"
+if [ -z "$PLATFORM" ]; then
+  # No platform supplied (direct/manual use): assume laravel, never silently.
+  PLATFORM="laravel"
+  echo "sql-sync (remote): no platform specified (SQL_SYNC_PLATFORM unset); assuming laravel"
+fi
+echo "sql-sync (remote): platform: $PLATFORM"
 DUMP_CMD="${SQL_SYNC_DUMP_CMD:-}"
 OUT="$TMP_DIR/sql-sync.sql"
 
