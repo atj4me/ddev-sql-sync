@@ -309,11 +309,32 @@ exit 0
 STUBEOF
   cat > "${STUB_DIR}/ddev" <<'STUBEOF'
 #!/usr/bin/env bash
+printf 'ddev: %s\n' "$*" >> "${SQL_SYNC_TEST_DDEV_CAPTURE}"
 exit 0
 STUBEOF
   chmod +x "${STUB_DIR}/ssh" "${STUB_DIR}/rsync" "${STUB_DIR}/ddev"
   export SQL_SYNC_TEST_SSH_CAPTURE="${FAKE_DIR}/ssh-capture.txt"
   export SQL_SYNC_TEST_RSYNC_CAPTURE="${FAKE_DIR}/rsync-capture.txt"
+  export SQL_SYNC_TEST_DDEV_CAPTURE="${FAKE_DIR}/ddev-capture.txt"
+}
+
+# A mysql stand-in that answers the information_schema size query with
+# SQL_SYNC_TEST_SIZE (bytes). Needs STUB_DIR from make_stub_mysqldump.
+make_stub_mysql() {
+  cat > "${STUB_DIR}/mysql" <<'STUBEOF'
+#!/usr/bin/env bash
+echo "${SQL_SYNC_TEST_SIZE:-2048}"
+STUBEOF
+  chmod +x "${STUB_DIR}/mysql"
+}
+
+# A df stand-in that reports a nearly full filesystem (~1 MB available).
+make_stub_df() {
+  cat > "${STUB_DIR}/df" <<'STUBEOF'
+#!/usr/bin/env bash
+printf 'Filesystem     1024-blocks    Used Available Capacity Mounted on\n/dev/fake          1000000  999000      1000      99%% /tmp\n'
+STUBEOF
+  chmod +x "${STUB_DIR}/df"
 }
 
 @test "host command: jump host reaches ssh and rsync, absent without jump:" {
@@ -501,6 +522,84 @@ FIXEOF
   assert_success
   run cat "${SQL_SYNC_TEST_SSH_CAPTURE}"
   assert_output --partial "SQL_SYNC_PLATFORM=laravel"
+}
+
+@test "remote preflight: wordpress mysqldump fallback reports without dumping or leaking the password" {
+  set -eu -o pipefail
+  make_stub_mysqldump
+  make_stub_mysql
+  FIXTURE_DIR="$(mktemp -d)"
+  cat > "${FIXTURE_DIR}/wp-config.php" <<'FIXEOF'
+<?php
+define( 'DB_NAME', 'wpdb' );
+define( 'DB_USER', 'wpuser' );
+define( 'DB_PASSWORD', 'wppass' );
+define( 'DB_HOST', 'localhost' );
+FIXEOF
+  export SQL_SYNC_TEST_CAPTURE="${FIXTURE_DIR}/capture.txt"
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" SQL_SYNC_ROOT="${FIXTURE_DIR}" SQL_SYNC_TMP="${FIXTURE_DIR}" SQL_SYNC_PLATFORM=wordpress SQL_SYNC_PREFLIGHT=1 bash "${DIR}/sql-sync/remote-dump.sh"
+  assert_success
+  assert_output --partial "platform: wordpress"
+  assert_output --partial "preflight: strategy: mysqldump"
+  assert_output --partial "preflight: database: wpdb"
+  assert_output --partial "preflight: username: wpuser"
+  assert_output --partial "preflight: password: resolved (never shown)"
+  assert_output --partial "preflight: database size:"
+  assert_output --partial "preflight: all checks passed"
+  # The fixture password must not appear anywhere in the output
+  refute_output --partial "wppass"
+  # Nothing was dumped: mysqldump never ran and no dump file exists
+  [ ! -e "${SQL_SYNC_TEST_CAPTURE}" ]
+  [ ! -e "${FIXTURE_DIR}/sql-sync.sql" ]
+}
+
+@test "remote dump: aborts before dumping when free space is below the database size" {
+  set -eu -o pipefail
+  make_stub_mysqldump
+  make_stub_mysql
+  make_stub_df
+  FIXTURE_DIR="$(mktemp -d)"
+  cat > "${FIXTURE_DIR}/.env" <<'FIXEOF'
+DB_DATABASE=fixturedb
+DB_USERNAME=fixtureuser
+DB_PASSWORD=fixturepass
+DB_HOST=127.0.0.1
+FIXEOF
+  export SQL_SYNC_TEST_CAPTURE="${FIXTURE_DIR}/capture.txt"
+  export SQL_SYNC_TEST_SIZE=100000000000
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" SQL_SYNC_ROOT="${FIXTURE_DIR}" SQL_SYNC_TMP="${FIXTURE_DIR}" SQL_SYNC_PLATFORM=laravel bash "${DIR}/sql-sync/remote-dump.sh"
+  assert_failure
+  assert_output --partial "not enough free space"
+  # The abort fired before any dump command ran
+  [ ! -e "${SQL_SYNC_TEST_CAPTURE}" ]
+  [ ! -e "${FIXTURE_DIR}/sql-sync.sql" ]
+}
+
+@test "host command: --dry-run runs preflight only, no rsync, no import" {
+  set -eu -o pipefail
+  make_fake_project
+  cat > "${FAKE_DIR}/.ddev/sql-sync/aliases.yml" <<FIXEOF
+local:
+  dir: ${FAKE_DIR}/dumps
+
+prod:
+  host: app.example.com
+  user: deploy
+  root: /var/www/example
+FIXEOF
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod --dry-run
+  assert_success
+  assert_output --partial "preflight: ok: local dump dir"
+  assert_output --partial "preflight: ok: ssh connectivity"
+  assert_output --partial "plan: the dump would be downloaded to"
+  assert_output --partial "plan: sanitize after import:"
+  assert_output --partial "No dump was taken, nothing was imported"
+  run cat "${SQL_SYNC_TEST_SSH_CAPTURE}"
+  assert_output --partial "SQL_SYNC_PREFLIGHT=1"
+  assert_output --partial "BatchMode=yes"
+  # No download and no import happened
+  [ ! -e "${SQL_SYNC_TEST_RSYNC_CAPTURE}" ]
+  [ ! -e "${SQL_SYNC_TEST_DDEV_CAPTURE}" ]
 }
 
 # bats test_tags=release

@@ -46,6 +46,11 @@ Options:
                     server by an earlier run (see --no-sync).
   --no-sync         Only create the dump on the server and download it;
                     do not import or sanitize.
+  --dry-run         Preflight only: check ssh connectivity, platform, dump
+                    strategy, credentials (the password is never shown),
+                    database size and disk space, then print the plan.
+                    Takes no dump, imports nothing, and writes nothing on
+                    the server.
   -y, --yes         Do not ask for confirmation.
   -h, --help        Show this help.
 EOF
@@ -137,6 +142,7 @@ DUMP_DIR_CLI=""
 NO_DUMP="false"
 NO_SYNC="false"
 ASSUME_YES="false"
+DRY_RUN="false"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -150,6 +156,7 @@ while [ $# -gt 0 ]; do
       ;;
     --no-dump) NO_DUMP="true" ;;
     --no-sync) NO_SYNC="true" ;;
+    --dry-run) DRY_RUN="true" ;;
     -y|--yes) ASSUME_YES="true" ;;
     -h|--help)
       usage
@@ -285,7 +292,7 @@ echo "         dump file: $DUMP_FILE"
 
 # --- Confirm (Drush-style) ---------------------------------------------------
 
-if [ "$ASSUME_YES" != "true" ] && [ "$NO_SYNC" != "true" ]; then
+if [ "$ASSUME_YES" != "true" ] && [ "$NO_SYNC" != "true" ] && [ "$DRY_RUN" != "true" ]; then
   echo "This will replace the database of this DDEV project with a dump from @$ALIAS."
   printf 'Continue? [y/N] '
   reply=""
@@ -298,6 +305,59 @@ if [ "$ASSUME_YES" != "true" ] && [ "$NO_SYNC" != "true" ]; then
     y|Y|yes|YES) ;;
     *) echo "Aborted."; exit 1 ;;
   esac
+fi
+
+# --- Dry run: preflight only -----------------------------------------------------
+
+if [ "$DRY_RUN" = "true" ]; then
+  echo "==> Dry run: preflight checks only — no dump, no download, no import."
+  DRY_FAILED=""
+  if [ -d "$DUMP_DIR" ] && [ -w "$DUMP_DIR" ]; then
+    echo "preflight: ok: local dump dir $DUMP_DIR exists and is writable"
+  else
+    echo "preflight: FAIL: local dump dir $DUMP_DIR is not writable"
+    DRY_FAILED=1
+  fi
+  # The remote half in preflight mode (SQL_SYNC_PREFLIGHT): it checks and
+  # reports, and exits before writing anything. BatchMode + a short timeout
+  # make the connectivity check fail fast instead of hanging on a prompt.
+  # $SSH_OPTIONS is intentionally unquoted: it holds separate ssh options.
+  REMOTE_OUT=""
+  PREFLIGHT_RC=0
+  REMOTE_OUT="$(ssh -o BatchMode=yes -o ConnectTimeout=10 $SSH_OPTIONS "$SSH_TARGET" "SQL_SYNC_ROOT=$(printf '%q' "$ALIAS_ROOT") SQL_SYNC_TMP=$(printf '%q' "$ALIAS_TMP") SQL_SYNC_PLATFORM=$(printf '%q' "$PLATFORM") SQL_SYNC_DUMP_CMD=$(printf '%q' "$DUMP_CMD") SQL_SYNC_DB_NAME=$(printf '%q' "$DB_NAME_OVERRIDE") SQL_SYNC_DB_USERNAME=$(printf '%q' "$DB_USERNAME_OVERRIDE") SQL_SYNC_DB_PASSWORD=$(printf '%q' "$DB_PASSWORD_OVERRIDE") SQL_SYNC_DB_HOST=$(printf '%q' "$DB_HOST_OVERRIDE") SQL_SYNC_DB_PORT=$(printf '%q' "$DB_PORT_OVERRIDE") SQL_SYNC_PREFLIGHT=1 bash -s" < "$ADDON_DIR/remote-dump.sh" 2>&1)" || PREFLIGHT_RC=$?
+  if [ "$PREFLIGHT_RC" -eq 0 ]; then
+    echo "preflight: ok: ssh connectivity to $SSH_TARGET (BatchMode, 10s timeout)"
+  else
+    echo "preflight: FAIL: ssh preflight on $SSH_TARGET exited $PREFLIGHT_RC (connectivity or a remote check failed; remote output follows)"
+    DRY_FAILED=1
+  fi
+  if [ -n "$REMOTE_OUT" ]; then
+    printf '%s\n' "$REMOTE_OUT"
+  fi
+  # The sanitize plan mirrors the decision step 4 below would make.
+  SANITIZE_PLAN=""
+  if [ "$SANITIZE" != "true" ]; then
+    SANITIZE_PLAN="no (--no-sanitize)"
+  elif [ -n "$SANITIZE_OVERRIDE" ]; then
+    SANITIZE_PLAN="yes — the alias's sanitize file ($SANITIZE_KEY)"
+  elif [ "$PLATFORM" = "drupal" ]; then
+    if ddev drush --version >/dev/null 2>&1; then
+      SANITIZE_PLAN="yes — drush sql-sanitize"
+    else
+      SANITIZE_PLAN="none available (drupal without drush or a sanitize file); a real run would import unsanitized"
+    fi
+  elif [ "$PLATFORM" = "laravel" ]; then
+    SANITIZE_PLAN="yes — built-in laravel sanitize (users table)"
+  elif [ "$PLATFORM" = "wordpress" ]; then
+    SANITIZE_PLAN="yes — built-in wordpress sanitize (wp_users table)"
+  else
+    SANITIZE_PLAN="none available for platform '$PLATFORM'; a real run would import unsanitized"
+  fi
+  echo "plan: the dump would be downloaded to $DUMP_FILE"
+  echo "plan: sanitize after import: $SANITIZE_PLAN"
+  echo "sql-sync: dry run complete. No dump was taken, nothing was imported, and nothing was written on the server."
+  [ -z "$DRY_FAILED" ] || exit 1
+  exit 0
 fi
 
 # --- Step 1: dump on the remote ----------------------------------------------
