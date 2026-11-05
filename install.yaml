@@ -1,0 +1,37 @@
+name: sql-sync
+ddev_version_constraint: '>= v1.24.0'
+project_files:
+  - commands/host/sql-sync
+  - sql-sync/remote-dump.sh
+  - sql-sync/sanitize-laravel.sql
+  - sql-sync/sanitize-wordpress.sql
+  - sql-sync/aliases.example.yml
+removal_actions:
+  - |
+    #ddev-description:Remove sql-sync command and bundled files
+    rm -f ${DDEV_APPROOT}/.ddev/commands/host/sql-sync ${DDEV_APPROOT}/.ddev/sql-sync/remote-dump.sh ${DDEV_APPROOT}/.ddev/sql-sync/sanitize-laravel.sql ${DDEV_APPROOT}/.ddev/sql-sync/sanitize-wordpress.sql ${DDEV_APPROOT}/.ddev/sql-sync/aliases.example.yml
+post_install_actions:
+  - |
+    #ddev-description:Create aliases.yml from the example if it does not exist yet
+    if [ ! -f ${DDEV_APPROOT}/.ddev/sql-sync/aliases.yml ]; then cp ${DDEV_APPROOT}/.ddev/sql-sync/aliases.example.yml ${DDEV_APPROOT}/.ddev/sql-sync/aliases.yml && echo "Created .ddev/sql-sync/aliases.yml from the example — edit it with your server details."; else echo "Keeping your existing .ddev/sql-sync/aliases.yml (it is never overwritten)."; fi
+  - |
+    #ddev-description:Print setup instructions
+    cat <<-EOF
+
+    🚀 ddev-sql-sync installed successfully!
+
+    Sync a production database into this DDEV project:
+      ddev sql-sync @prod @self
+
+    Setup:
+      1. Edit .ddev/sql-sync/aliases.yml — set your server's host (an
+         ~/.ssh/config alias or hostname) and the app path (root:) per alias.
+         The platform defaults to this project's DDEV type; database
+         credentials are read from the app's own config on the server.
+      2. Make sure you can ssh to the server non-interactively
+         (key in ~/.ssh, host alias in ~/.ssh/config if you use one).
+      3. Run: ddev sql-sync @prod
+
+    Repository: https://github.com/atj4me/ddev-sql-sync
+
+    EOF

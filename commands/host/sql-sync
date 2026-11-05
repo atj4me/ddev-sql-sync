@@ -1,0 +1,362 @@
+#!/usr/bin/env bash
+## #ddev-generated: This file is managed by the sql-sync add-on (atj4me/ddev-sql-sync). It will be overwritten on add-on updates; put your configuration in .ddev/sql-sync/aliases.yml instead.
+## Description: Sync a database from a remote server into this DDEV project (ssh + mysqldump + rsync + import + sanitize)
+## Usage: sql-sync @prod [@self] [--sanitize|--no-sanitize] [--dump-dir=<path>] [--no-dump] [--no-sync] [-y]
+## Example: "ddev sql-sync @prod" syncs the @prod alias into this project
+## Example: "ddev sql-sync @prod @self" the same, with the target stated explicitly (Drush-style)
+## Example: "ddev sql-sync @prod --no-sanitize" syncs without scrubbing user emails/passwords
+
+set -euo pipefail
+
+APPROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+ADDON_DIR="$APPROOT/.ddev/sql-sync"
+ALIASES_FILE="$ADDON_DIR/aliases.yml"
+
+usage() {
+  cat <<'EOF'
+Usage: ddev sql-sync <source> [<target>] [options]
+
+Sync a MySQL database from a remote server into this DDEV project:
+ssh + a dump on the remote, rsync the dump down, ddev import-db, then sanitize.
+
+  <source>          Alias from .ddev/sql-sync/aliases.yml, with or without the
+                    leading @ (e.g. @prod). The alias gives the ssh host and
+                    the app path on the server. Its platform defaults to this
+                    project's DDEV type (.ddev/config.yaml) and can be set
+                    per alias with the platform: key (laravel, wordpress or
+                    drupal). The platform decides how the dump is made on the
+                    server: the app's own export tool when it has one
+                    (WP-CLI / Drush), otherwise mysqldump with credentials
+                    from the alias's database: block and/or the app's own
+                    config (.env, wp-config.php, settings.php).
+  <target>          Only @self (this DDEV project) is supported; may be omitted.
+
+Options:
+  --sanitize        Sanitize after import (default): scrub user emails and
+                    passwords in the local database.
+  --no-sanitize     Skip the sanitize step. The local database will contain
+                    real production emails and password hashes.
+  --dump-dir=<path> Folder for the downloaded dump (overrides local.dir in
+                    aliases.yml; default ~/sql-sync).
+  --no-dump         Do not create a new dump; rsync the dump file left on the
+                    server by an earlier run (see --no-sync).
+  --no-sync         Only create the dump on the server and download it;
+                    do not import or sanitize.
+  -y, --yes         Do not ask for confirmation.
+  -h, --help        Show this help.
+EOF
+}
+
+fail() {
+  echo "sql-sync: $*" >&2
+  exit 1
+}
+
+# Read one key from one section of the aliases file. Only keys at the
+# section's own indent level match, so the nested database: block's keys
+# (host, port, ...) are never confused with the alias's own keys.
+alias_value() {
+  local section="$1" key="$2"
+  awk -v section="$section" -v key="$key" '
+    function indent_of(s,   n) { n = 0; while (substr(s, n + 1, 1) == " ") n++; return n }
+    /^[A-Za-z0-9_-]+:/ {
+      current = $0
+      sub(/:.*/, "", current)
+      in_section = (current == section)
+      child_indent = -1
+      next
+    }
+    in_section {
+      if ($0 ~ /^[[:space:]]*$/) next
+      if ($0 ~ /^[[:space:]]*#/) next
+      ind = indent_of($0)
+      if (child_indent < 0) child_indent = ind
+      if (ind == child_indent && $0 ~ "^[[:space:]]+" key ":") {
+        line = $0
+        sub("^[[:space:]]+" key ":[[:space:]]*", "", line)
+        sub(/[[:space:]]+$/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "$ALIASES_FILE"
+}
+
+# Read one key from a section's nested database: block.
+alias_db_value() {
+  local section="$1" key="$2"
+  awk -v section="$section" -v key="$key" '
+    function indent_of(s,   n) { n = 0; while (substr(s, n + 1, 1) == " ") n++; return n }
+    /^[A-Za-z0-9_-]+:/ {
+      current = $0
+      sub(/:.*/, "", current)
+      in_section = (current == section)
+      in_db = 0
+      next
+    }
+    in_section {
+      if ($0 ~ /^[[:space:]]*$/) next
+      if ($0 ~ /^[[:space:]]*#/) next
+      ind = indent_of($0)
+      if (in_db && ind <= db_indent) in_db = 0
+      if (!in_db && $0 ~ /^[[:space:]]+database:[[:space:]]*$/) {
+        in_db = 1
+        db_indent = ind
+        next
+      }
+      if (in_db && ind > db_indent && $0 ~ "^[[:space:]]+" key ":") {
+        line = $0
+        sub("^[[:space:]]+" key ":[[:space:]]*", "", line)
+        sub(/[[:space:]]+$/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "$ALIASES_FILE"
+}
+
+unquote() {
+  local value="$1"
+  value="${value%\"}"
+  value="${value#\"}"
+  value="${value%\'}"
+  value="${value#\'}"
+  printf '%s' "$value"
+}
+
+# --- Parse arguments ---------------------------------------------------------
+
+SOURCE=""
+TARGET=""
+SANITIZE="true"
+DUMP_DIR_CLI=""
+NO_DUMP="false"
+NO_SYNC="false"
+ASSUME_YES="false"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --sanitize) SANITIZE="true" ;;
+    --no-sanitize) SANITIZE="false" ;;
+    --dump-dir=*) DUMP_DIR_CLI="${1#--dump-dir=}" ;;
+    --dump-dir)
+      shift
+      [ $# -gt 0 ] || fail "--dump-dir needs a path"
+      DUMP_DIR_CLI="$1"
+      ;;
+    --no-dump) NO_DUMP="true" ;;
+    --no-sync) NO_SYNC="true" ;;
+    -y|--yes) ASSUME_YES="true" ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      echo "sql-sync: unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      if [ -z "$SOURCE" ]; then
+        SOURCE="$1"
+      elif [ -z "$TARGET" ]; then
+        TARGET="$1"
+      else
+        fail "unexpected argument: $1"
+      fi
+      ;;
+  esac
+  shift
+done
+
+[ -n "$SOURCE" ] || { usage >&2; fail "a source alias is required, e.g. ddev sql-sync @prod @self"; }
+ALIAS="${SOURCE#@}"
+TARGET="${TARGET:-@self}"
+[ "$TARGET" = "@self" ] || fail "only @self is supported as the target in this version (got '$TARGET'). This tool never writes to a remote server."
+if [ "$NO_DUMP" = "true" ] && [ "$NO_SYNC" = "true" ]; then
+  fail "--no-dump and --no-sync together would not do anything: --no-dump expects a dump an earlier --no-sync run left on the server"
+fi
+
+# --- Load the alias ----------------------------------------------------------
+
+[ -f "$ALIASES_FILE" ] || fail "no aliases file found at .ddev/sql-sync/aliases.yml
+Create it from the shipped example:
+  cp .ddev/sql-sync/aliases.example.yml .ddev/sql-sync/aliases.yml
+then fill in your server's host and app path. See the example file for the format."
+
+case "$ALIAS" in
+  ""|*[!A-Za-z0-9_-]*)
+    fail "invalid alias name: '$SOURCE'"
+    ;;
+esac
+
+alias_defined() {
+  grep -qE "^${1}:" "$ALIASES_FILE"
+}
+
+if ! alias_defined "$ALIAS"; then
+  available="$(grep -oE '^[A-Za-z0-9_-]+:' "$ALIASES_FILE" | tr -d ':' | grep -v '^local$' | paste -sd ' ' - || true)"
+  fail "unknown alias '@$ALIAS' in .ddev/sql-sync/aliases.yml (aliases defined: ${available:-none})"
+fi
+
+ALIAS_HOST="$(unquote "$(alias_value "$ALIAS" host)")"
+ALIAS_USER="$(unquote "$(alias_value "$ALIAS" user)")"
+ALIAS_ROOT="$(unquote "$(alias_value "$ALIAS" root)")"
+ALIAS_TMP="$(unquote "$(alias_value "$ALIAS" tmp)")"
+ALIAS_OPTIONS="$(alias_value "$ALIAS" options)"
+PLATFORM="$(unquote "$(alias_value "$ALIAS" platform)")"
+DUMP_CMD="$(unquote "$(alias_value "$ALIAS" dump)")"
+SANITIZE_KEY="$(unquote "$(alias_value "$ALIAS" sanitize)")"
+LOCAL_DIR="$(unquote "$(alias_value "local" dir)")"
+# Optional explicit database credentials (merged over the app's own config
+# on the server; see remote-dump.sh). Never echoed anywhere.
+DB_NAME_OVERRIDE="$(unquote "$(alias_db_value "$ALIAS" name)")"
+DB_USERNAME_OVERRIDE="$(unquote "$(alias_db_value "$ALIAS" username)")"
+DB_PASSWORD_OVERRIDE="$(unquote "$(alias_db_value "$ALIAS" password)")"
+DB_HOST_OVERRIDE="$(unquote "$(alias_db_value "$ALIAS" host)")"
+DB_PORT_OVERRIDE="$(unquote "$(alias_db_value "$ALIAS" port)")"
+
+[ -n "$ALIAS_HOST" ] || fail "alias '@$ALIAS' in .ddev/sql-sync/aliases.yml is missing the required 'host' key (an ~/.ssh/config alias or a hostname)"
+[ -n "$ALIAS_ROOT" ] || fail "alias '@$ALIAS' in .ddev/sql-sync/aliases.yml is missing the required 'root' key (the app's path on the server)"
+ALIAS_TMP="${ALIAS_TMP:-/tmp}"
+
+# Platform: the alias's platform: key wins; otherwise this project's own
+# DDEV type (the local project is the same application as production).
+if [ -z "$PLATFORM" ]; then
+  DDEV_TYPE=""
+  if [ -f "$APPROOT/.ddev/config.yaml" ]; then
+    DDEV_TYPE="$(grep -E '^type:' "$APPROOT/.ddev/config.yaml" | head -n 1 | sed -E 's/^type:[[:space:]]*//; s/[[:space:]]*$//')" || DDEV_TYPE=""
+    DDEV_TYPE="$(unquote "$DDEV_TYPE")"
+  fi
+  case "$DDEV_TYPE" in
+    laravel) PLATFORM="laravel" ;;
+    wordpress) PLATFORM="wordpress" ;;
+    drupal|drupal6|drupal7|drupal8|drupal9|drupal10|drupal11) PLATFORM="drupal" ;;
+    *) PLATFORM="laravel" ;;
+  esac
+fi
+
+case "$PLATFORM" in
+  laravel|wordpress|drupal) ;;
+  *)
+    if [ -z "$DUMP_CMD" ]; then
+      fail "alias '@$ALIAS' has unknown platform '$PLATFORM' (expected laravel, wordpress or drupal — or set a 'dump:' command in the alias, which works for any platform)"
+    fi
+    ;;
+esac
+
+# Resolve the alias's sanitize: file (if any) now, before any ssh happens.
+SANITIZE_OVERRIDE=""
+if [ -n "$SANITIZE_KEY" ]; then
+  case "$SANITIZE_KEY" in
+    /*) SANITIZE_OVERRIDE="$SANITIZE_KEY" ;;
+    *) SANITIZE_OVERRIDE="$APPROOT/$SANITIZE_KEY" ;;
+  esac
+  [ -f "$SANITIZE_OVERRIDE" ] || fail "the sanitize file set in alias '@$ALIAS' was not found: $SANITIZE_KEY (looked for $SANITIZE_OVERRIDE)"
+fi
+
+DUMP_DIR="${DUMP_DIR_CLI:-${LOCAL_DIR:-~/sql-sync}}"
+case "$DUMP_DIR" in
+  "~") DUMP_DIR="$HOME" ;;
+  "~/"*) DUMP_DIR="$HOME/${DUMP_DIR#~/}" ;;
+esac
+mkdir -p "$DUMP_DIR"
+
+SSH_TARGET="$ALIAS_HOST"
+[ -n "$ALIAS_USER" ] && SSH_TARGET="$ALIAS_USER@$ALIAS_HOST"
+SSH_OPTIONS="$ALIAS_OPTIONS"
+REMOTE_FILE="$ALIAS_TMP/sql-sync.sql"
+DUMP_FILE="$DUMP_DIR/$ALIAS.sql"
+
+echo "sql-sync: @$ALIAS ($SSH_TARGET:$ALIAS_ROOT, platform: $PLATFORM) -> @self"
+echo "         dump file: $DUMP_FILE"
+
+# --- Confirm (Drush-style) ---------------------------------------------------
+
+if [ "$ASSUME_YES" != "true" ] && [ "$NO_SYNC" != "true" ]; then
+  echo "This will replace the database of this DDEV project with a dump from @$ALIAS."
+  printf 'Continue? [y/N] '
+  reply=""
+  if [ -r /dev/tty ]; then
+    read -r reply < /dev/tty || reply=""
+  else
+    read -r reply || reply=""
+  fi
+  case "$reply" in
+    y|Y|yes|YES) ;;
+    *) echo "Aborted."; exit 1 ;;
+  esac
+fi
+
+# --- Step 1: dump on the remote ----------------------------------------------
+
+if [ "$NO_DUMP" = "true" ]; then
+  echo "==> [1/4] Skipping dump creation (--no-dump); expecting an existing dump at $SSH_TARGET:$REMOTE_FILE"
+else
+  echo "==> [1/4] Creating dump on $SSH_TARGET ..."
+  # The remote half of the add-on ships as an installed file and is piped to
+  # the server over ssh. The SQL_SYNC_DB_* values (if any) come from the
+  # alias's database: block and override the app's own config field by field.
+  # $SSH_OPTIONS is intentionally unquoted: it holds separate ssh options.
+  ssh $SSH_OPTIONS "$SSH_TARGET" "SQL_SYNC_ROOT=$(printf '%q' "$ALIAS_ROOT") SQL_SYNC_TMP=$(printf '%q' "$ALIAS_TMP") SQL_SYNC_PLATFORM=$(printf '%q' "$PLATFORM") SQL_SYNC_DUMP_CMD=$(printf '%q' "$DUMP_CMD") SQL_SYNC_DB_NAME=$(printf '%q' "$DB_NAME_OVERRIDE") SQL_SYNC_DB_USERNAME=$(printf '%q' "$DB_USERNAME_OVERRIDE") SQL_SYNC_DB_PASSWORD=$(printf '%q' "$DB_PASSWORD_OVERRIDE") SQL_SYNC_DB_HOST=$(printf '%q' "$DB_HOST_OVERRIDE") SQL_SYNC_DB_PORT=$(printf '%q' "$DB_PORT_OVERRIDE") bash -s" < "$ADDON_DIR/remote-dump.sh"
+fi
+
+if [ "$NO_SYNC" = "true" ]; then
+  echo "==> --no-sync: dump left on $SSH_TARGET at $REMOTE_FILE; nothing downloaded or imported."
+  exit 0
+fi
+
+# --- Step 2: rsync the dump down ----------------------------------------------
+
+echo "==> [2/4] Downloading dump to $DUMP_FILE ..."
+# $SSH_OPTIONS is intentionally unquoted: it holds separate ssh options.
+rsync -az -e "ssh $SSH_OPTIONS" "$SSH_TARGET:$REMOTE_FILE" "$DUMP_FILE"
+
+echo "==> Removing the remote temp file ..."
+ssh $SSH_OPTIONS "$SSH_TARGET" "rm -f $(printf '%q' "$REMOTE_FILE")"
+
+# --- Step 3: import ------------------------------------------------------------
+
+echo "==> [3/4] Importing into this DDEV project ..."
+ddev import-db --file="$DUMP_FILE"
+
+# --- Step 4: sanitize ------------------------------------------------------------
+
+echo "==> [4/4] Sanitize ..."
+if [ "$SANITIZE" != "true" ]; then
+  echo "    SKIPPED (--no-sanitize). WARNING: the local database now contains real"
+  echo "    production user emails and password hashes. Handle the dump in"
+  echo "    $DUMP_DIR accordingly and delete it when you are done."
+elif [ "$PLATFORM" = "drupal" ] && [ -z "$SANITIZE_OVERRIDE" ] && ddev drush --version >/dev/null 2>&1; then
+  # Drupal hashes passwords in PHP, so there is no bundled SQL sanitize;
+  # use the app's own tool when the project has Drush.
+  ddev drush sql-sanitize --yes
+  echo "    Sanitized with Drush sql-sanitize (user emails and passwords scrubbed)."
+elif [ -n "$SANITIZE_OVERRIDE" ]; then
+  ddev mysql < "$SANITIZE_OVERRIDE"
+  echo "    Sanitized with the alias's sanitize file: $SANITIZE_KEY"
+elif [ "$PLATFORM" = "laravel" ] && [ -f "$ADDON_DIR/sanitize-laravel.sql" ]; then
+  if ddev mysql -N -e "SHOW TABLES LIKE 'users';" | grep -qx "users"; then
+    ddev mysql < "$ADDON_DIR/sanitize-laravel.sql"
+    echo "    Sanitized: user emails are now user<id>@example.test and passwords are 'password'."
+  else
+    echo "    No 'users' table in the imported database — sanitize skipped, nothing was changed."
+  fi
+elif [ "$PLATFORM" = "wordpress" ] && [ -f "$ADDON_DIR/sanitize-wordpress.sql" ]; then
+  if ddev mysql -N -e "SHOW TABLES LIKE 'wp_users';" | grep -qx "wp_users"; then
+    ddev mysql < "$ADDON_DIR/sanitize-wordpress.sql"
+    echo "    Sanitized: user emails are now user<id>@example.test and passwords are 'password'."
+  else
+    echo "    No 'wp_users' table in the imported database — sanitize skipped, nothing was changed."
+  fi
+elif [ "$PLATFORM" = "drupal" ]; then
+  echo "    No sanitize ran: Drupal hashes passwords in PHP, so there is no bundled"
+  echo "    SQL sanitize. Install Drush in this project (then ddev drush sql-sanitize"
+  echo "    is used automatically), or set a 'sanitize:' SQL file in the alias."
+  echo "    The imported database has NOT been sanitized."
+else
+  echo "    No sanitize available for platform '$PLATFORM': set a 'sanitize:' SQL file"
+  echo "    in the alias to enable one. The imported database has NOT been sanitized."
+fi
+
+echo "sql-sync: done. @$ALIAS is now this project's database."

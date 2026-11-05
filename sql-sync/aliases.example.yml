@@ -1,0 +1,64 @@
+# #ddev-generated: This example file is managed by the sql-sync add-on (atj4me/ddev-sql-sync) and may be overwritten on add-on updates. Your real configuration lives in aliases.yml (same folder), which the add-on never overwrites or removes.
+#
+# Copy this file to aliases.yml and fill in your servers:
+#   cp .ddev/sql-sync/aliases.example.yml .ddev/sql-sync/aliases.yml
+#
+# Each alias describes one remote server. Usage: ddev sql-sync @prod @self
+#
+# Normally no secrets live in this file: database credentials are read from
+# the app's own config on the server at dump time, and ssh access uses your
+# own keys / ~/.ssh/config. The one exception is the optional database:
+# block below — if you put a real password there, treat aliases.yml as a
+# secret file (it lives under .ddev/, which many projects gitignore, but
+# check yours; chmod 600 is a good idea).
+
+# Local settings (optional).
+local:
+  # Folder the downloaded dumps are kept in. --dump-dir overrides this.
+  dir: ~/sql-sync
+
+prod:
+  # An ~/.ssh/config alias or a hostname.
+  host: cpgconnect-prod
+  # Optional: when set, the ssh target is user@host.
+  user: deploy
+  # The app's path on the server.
+  root: /var/www/cpgconnect
+  # Optional: which platform's conventions to use on the server. Defaults to
+  # this project's DDEV type from .ddev/config.yaml, so it is usually
+  # unnecessary. The platform decides the dump strategy:
+  #   - the app's own export when it has one and it is installed on the
+  #     server (wp db export for wordpress, drush sql-dump for drupal;
+  #     laravel has no native data export), otherwise
+  #   - mysqldump, with credentials from the database: block below and/or
+  #     the app's own config (laravel: <root>/.env, wordpress:
+  #     <root>/wp-config.php, drupal: <root>/sites/default/settings.php).
+  # platform: laravel
+  # Optional: folder for the dump on the server before rsync. Default /tmp.
+  tmp: /tmp
+  # Optional: extra ssh options, e.g. options: -i ~/.ssh/prod_key
+  # options:
+  # Optional escape hatch: a command on the server whose stdout IS the dump.
+  # When set it replaces both strategies above — works for any platform.
+  # dump: drush sql-dump
+  # Optional: explicit database credentials, for setups where reading the
+  # app's config cannot work (managed database hosts, split credentials).
+  # Any field left out falls back to the app's own config, field by field.
+  # host/port are from the app server's perspective.
+  # database:
+  #   name: cpgconnect
+  #   username: cpg_user
+  #   password: secret
+  #   host: 127.0.0.1
+  #   port: 3306
+  # Optional: a project-local SQL file (relative to the project root) to
+  # sanitize with after import, instead of the built-in sanitize. For drupal
+  # this is the fallback when the project has no Drush (ddev drush
+  # sql-sanitize is preferred there).
+  # sanitize: .ddev/sql-sync/my-sanitize.sql
+
+# staging:
+#   host: staging.example.com
+#   user: deploy
+#   root: /var/www/staging
+#   platform: wordpress

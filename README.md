@@ -1,0 +1,152 @@
+# DDEV sql-sync
+
+[![tests](https://github.com/atj4me/ddev-sql-sync/actions/workflows/tests.yml/badge.svg)](https://github.com/atj4me/ddev-sql-sync/actions/workflows/tests.yml)
+
+Sync a production MySQL database into your local [DDEV](https://ddev.com) project — modelled on Drush's `sql-sync`, for any plain SSH-accessible server (a VPS running Laravel, WordPress, Drupal, …), not just hosted platforms.
+
+## What it does
+
+`ddev sql-sync @prod @self`:
+
+1. **Dump** — ssh to the server and create a database dump in a temp file there. See *Dump strategies* below.
+2. **Download** — rsync the dump into a local folder (default `~/sql-sync`), then delete the remote temp file.
+3. **Import** — `ddev import-db` into this project (you are asked to confirm first; the current local database is replaced).
+4. **Sanitize** — scrub user emails and passwords in the *local* database (on by default; see *Sanitize*).
+
+The add-on only ever **reads** from the server (a dump). It never writes to a remote database, and `@self` is the only supported target.
+
+## Installation
+
+```bash
+ddev add-on get atj4me/ddev-sql-sync
+ddev restart
+```
+
+## Configuration: `.ddev/sql-sync/aliases.yml`
+
+This file is the whole configuration. Installing the add-on copies `aliases.example.yml` to `aliases.yml` if you don't have one yet; **your `aliases.yml` is never overwritten by add-on updates and never removed** when the add-on is removed.
+
+```yaml
+local:
+  dir: ~/sql-sync        # where downloaded dumps are kept
+
+prod:
+  host: cpgconnect-prod  # an ~/.ssh/config alias or a hostname
+  user: deploy           # optional; ssh target becomes user@host
+  root: /var/www/cpgconnect  # the app's path on the server
+  tmp: /tmp              # optional; temp folder on the server
+```
+
+Define as many aliases as you like (`prod`, `staging`, …) and pick one per run: `ddev sql-sync @staging`.
+
+Optional per-alias keys:
+
+| Key | Purpose |
+| --- | --- |
+| `platform:` | `laravel`, `wordpress` or `drupal`. Defaults to this project's DDEV type from `.ddev/config.yaml`, so usually unset. |
+| `options:` | Extra ssh options, e.g. `options: -i ~/.ssh/prod_key`. |
+| `dump:` | A command on the server whose stdout **is** the dump (e.g. `dump: drush sql-dump`). Replaces both dump strategies below — works for any platform. |
+| `database:` | Explicit database credentials (see below). |
+| `sanitize:` | Path (relative to the project root) to your own SQL file to sanitize with after import. |
+
+### Database credentials: app config first, explicit block when needed
+
+Normally no credentials are configured at all: at dump time, the add-on reads them from the app's own config **on the server** — `.env` (Laravel), `wp-config.php` (WordPress), or `sites/default/settings.php` (Drupal). SSH authentication stays your own keys/`~/.ssh/config`; nothing is stored by the add-on.
+
+For setups where that can't work (managed database hosts, split credentials), an alias can pin values explicitly:
+
+```yaml
+prod:
+  # ...
+  database:
+    name: cpgconnect
+    username: cpg_user
+    password: secret
+    host: 127.0.0.1   # from the app server's perspective
+    port: 3306
+```
+
+Any field left out falls back to the app's config, field by field — you can pin just the password, or just host/port for an RDS-style endpoint.
+
+> **Treat a filled-in `password:` as a secret.** Prefer app-config extraction when it works. `aliases.yml` lives under `.ddev/`, which many projects gitignore (check yours), and `chmod 600 .ddev/sql-sync/aliases.yml` is a good idea if you use the block. The password is passed to mysqldump via the `MYSQL_PWD` environment variable only — never as a `-p` argument and never echoed.
+
+### One-time SSH setup (your side)
+
+Make sure you can reach the server non-interactively before the first run:
+
+```bash
+ssh your-server-alias 'echo ok'
+```
+
+If that prompts for a password, set up a key (`ssh-copy-id`) and, if you use a short alias like `cpgconnect-prod`, a matching entry in your `~/.ssh/config`. This is your own machine's SSH setup — the add-on doesn't manage keys.
+
+## Usage
+
+```bash
+ddev sql-sync @prod           # target @self is implied
+ddev sql-sync @prod @self     # Drush-style, explicit
+ddev sql-sync @prod -y        # skip the confirmation prompt
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--sanitize` / `--no-sanitize` | Sanitize after import (default on) / skip it. Skipping prints a loud warning: the local DB then holds real production emails and password hashes. |
+| `--dump-dir=<path>` | Where the dump is downloaded to (overrides `local.dir`). |
+| `--no-dump` | Don't create a new dump; rsync the dump file an earlier `--no-sync` run left on the server. |
+| `--no-sync` | Only create the dump on the server; don't download, import, or sanitize. |
+| `-y`, `--yes` | Don't ask for confirmation. |
+| `-h`, `--help` | Show help. |
+
+Dumps land at `<dump-dir>/<alias>.sql` and are **kept** after import (handy for re-importing). They contain production data — delete them when you no longer need them: `rm ~/sql-sync/*.sql`.
+
+## Platforms
+
+The dump strategy per alias, in order:
+
+1. **`dump:` override** — if the alias sets one, it always wins.
+2. **The app's own export tool**, run on the server in the app root, if the platform has one *and* it's installed there (checked at run time; if missing, the next strategy is used instead of failing):
+   - WordPress → `wp db export` (WP-CLI)
+   - Drupal → `drush sql-dump`
+   - Laravel → **no native data export exists** (`schema:dump` is structure-only), so Laravel always uses strategy 3.
+3. **mysqldump** — with credentials resolved as described above (explicit `database:` block merged over the app's config).
+
+The run tells you which strategy it used (`using WP-CLI export`, `using mysqldump`, …).
+
+Platform notes:
+
+- **Laravel / any `.env` app** — credentials from `<root>/.env`. Bedrock-style WordPress also fits here (set `platform: laravel`).
+- **WordPress (classic)** — credentials from the `DB_*` defines in `<root>/wp-config.php` (or one level up, as WordPress allows).
+- **Drupal** — dump via Drush when available; otherwise extraction reads the default `$databases` entry from `settings.php` with a small PHP snippet on the server (best-effort: a settings file that pulls credentials from the environment may not yield them — then use a `dump:` override such as `dump: drush sql-dump`, or pin a `database:` block).
+
+## Sanitize
+
+Runs after import, on the local database only:
+
+- **Laravel** — bundled SQL: `users.email` → `user<id>@example.test`, `users.password` → bcrypt of `password`, `remember_token` → `NULL`.
+- **WordPress** — bundled SQL: `wp_users.user_email` → `user<id>@example.test`, `wp_users.user_pass` → `MD5('password')` (WordPress accepts MD5 at login and rehashes transparently). Assumes the default `wp_` prefix.
+- **Drupal** — `ddev drush sql-sanitize` when the local project has Drush (Drupal hashes passwords in PHP, so there is deliberately **no** bundled SQL sanitize for it). Otherwise a `sanitize:` file from the alias is used; if neither exists, the run says plainly that no sanitize ran.
+- **Any platform** — an explicit `sanitize:` file in the alias is honoured; if no sanitize applies to a platform, the output says so rather than silently skipping.
+
+## Relationship to Drush `sql-sync`
+
+Mirrored deliberately: the two-position `sql-sync @source @target` form with `@self` as the local site, site aliases in a YAML file, the confirmation prompt, and `--no-dump` / `--no-sync` with their Drush meanings.
+
+Deviations, also deliberate:
+
+- **Sanitize is folded into the sync and ON by default** (Drush makes it a separate `sql-sanitize` command you must remember to run). `--no-sanitize` opts out.
+- **Only `@self` as target** in v1 — syncing *to* a remote is out of scope by design; the tool never writes to a remote server.
+- Aliases carry connection + app-path + platform in one flat file rather than Drush's per-site alias files, and credential resolution (app config / explicit block) replaces Drush's reliance on the app's own bootstrap, so it works the same for Laravel and WordPress.
+
+## Safety notes
+
+- The only operation ever performed on the server is creating a dump file in the alias's `tmp` folder (removed after download) — plus whatever a `dump:` command *you* configured chooses to do.
+- A downloaded dump is production data. The default sanitize scrubs the local **database**, not the dump file on disk; delete dumps you don't need.
+- The add-on stores no credentials of its own anywhere.
+
+## Removal
+
+```bash
+ddev add-on remove sql-sync
+```
+
+This removes the command and the bundled files. Your `aliases.yml` and any downloaded dumps are left in place — delete them manually if you want them gone.
