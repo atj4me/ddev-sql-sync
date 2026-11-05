@@ -19,11 +19,11 @@ local:
 
 prod:
   # An ~/.ssh/config alias or a hostname.
-  host: cpgconnect-prod
+  host: myserver
   # Optional: when set, the ssh target is user@host.
   user: deploy
   # The app's path on the server.
-  root: /var/www/cpgconnect
+  root: /var/www/example
   # Optional: which platform's conventions to use on the server. Defaults to
   # this project's DDEV type from .ddev/config.yaml, so it is usually
   # unnecessary. The platform decides the dump strategy:
@@ -46,8 +46,8 @@ prod:
   # Any field left out falls back to the app's own config, field by field.
   # host/port are from the app server's perspective.
   # database:
-  #   name: cpgconnect
-  #   username: cpg_user
+  #   name: example_db
+  #   username: example_user
   #   password: secret
   #   host: 127.0.0.1
   #   port: 3306

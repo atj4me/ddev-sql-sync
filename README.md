@@ -31,9 +31,9 @@ local:
   dir: ~/sql-sync        # where downloaded dumps are kept
 
 prod:
-  host: cpgconnect-prod  # an ~/.ssh/config alias or a hostname
+  host: myserver  # an ~/.ssh/config alias or a hostname
   user: deploy           # optional; ssh target becomes user@host
-  root: /var/www/cpgconnect  # the app's path on the server
+  root: /var/www/example  # the app's path on the server
   tmp: /tmp              # optional; temp folder on the server
 ```
 
@@ -59,8 +59,8 @@ For setups where that can't work (managed database hosts, split credentials), an
 prod:
   # ...
   database:
-    name: cpgconnect
-    username: cpg_user
+    name: example_db
+    username: example_user
     password: secret
     host: 127.0.0.1   # from the app server's perspective
     port: 3306
@@ -78,7 +78,7 @@ Make sure you can reach the server non-interactively before the first run:
 ssh your-server-alias 'echo ok'
 ```
 
-If that prompts for a password, set up a key (`ssh-copy-id`) and, if you use a short alias like `cpgconnect-prod`, a matching entry in your `~/.ssh/config`. This is your own machine's SSH setup — the add-on doesn't manage keys.
+If that prompts for a password, set up a key (`ssh-copy-id`) and, if you use a short alias like `myserver`, a matching entry in your `~/.ssh/config`. This is your own machine's SSH setup — the add-on doesn't manage keys.
 
 ## Usage
 
