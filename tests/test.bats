@@ -115,14 +115,19 @@ STUBEOF
   assert_failure
   assert_output --partial "@self"
 
+  # A missing target is rejected: source AND destination, always
+  run ddev sql-sync @prod -y
+  assert_failure
+  assert_output --partial "a target is required"
+
   # Unknown alias fails before any ssh attempt
-  run ddev sql-sync @nope -y
+  run ddev sql-sync @nope @self -y
   assert_failure
   assert_output --partial "unknown alias"
 
   # Missing aliases.yml fails with instructions
   rm .ddev/sql-sync/aliases.yml
-  run ddev sql-sync @prod -y
+  run ddev sql-sync @prod @self -y
   assert_failure
   assert_output --partial "aliases.yml"
 }
@@ -350,7 +355,7 @@ prod:
   root: /var/www/example
   jump: bastion.example.com
 FIXEOF
-  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod -y --no-sanitize
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod @self -y --no-sanitize
   assert_success
   # Both ssh calls (dump + cleanup) carry the -J value
   run grep -c -- "-J bastion.example.com" "${SQL_SYNC_TEST_SSH_CAPTURE}"
@@ -370,7 +375,7 @@ prod:
   root: /var/www/example
 FIXEOF
   rm -f "${SQL_SYNC_TEST_SSH_CAPTURE}" "${SQL_SYNC_TEST_RSYNC_CAPTURE}"
-  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod -y --no-sanitize
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod @self -y --no-sanitize
   assert_success
   run grep -- "-J" "${SQL_SYNC_TEST_SSH_CAPTURE}"
   assert_failure
@@ -495,14 +500,14 @@ FIXEOF
 
   # A generic DDEV php project type resolves to the php platform
   printf 'type: php\n' > "${FAKE_DIR}/.ddev/config.yaml"
-  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod -y --no-sanitize
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod @self -y --no-sanitize
   assert_success
   run cat "${SQL_SYNC_TEST_SSH_CAPTURE}"
   assert_output --partial "SQL_SYNC_PLATFORM=php"
 
   # No config.yaml at all also lands on php
   rm -f "${FAKE_DIR}/.ddev/config.yaml" "${SQL_SYNC_TEST_SSH_CAPTURE}"
-  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod -y --no-sanitize
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod @self -y --no-sanitize
   assert_success
   run cat "${SQL_SYNC_TEST_SSH_CAPTURE}"
   assert_output --partial "SQL_SYNC_PLATFORM=php"
@@ -510,7 +515,7 @@ FIXEOF
   # An unrecognised DDEV type lands on php too
   printf 'type: backdrop\n' > "${FAKE_DIR}/.ddev/config.yaml"
   rm -f "${SQL_SYNC_TEST_SSH_CAPTURE}"
-  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod -y --no-sanitize
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod @self -y --no-sanitize
   assert_success
   run cat "${SQL_SYNC_TEST_SSH_CAPTURE}"
   assert_output --partial "SQL_SYNC_PLATFORM=php"
@@ -518,7 +523,7 @@ FIXEOF
   # A recognised type still resolves to itself
   printf 'type: laravel\n' > "${FAKE_DIR}/.ddev/config.yaml"
   rm -f "${SQL_SYNC_TEST_SSH_CAPTURE}"
-  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod -y --no-sanitize
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod @self -y --no-sanitize
   assert_success
   run cat "${SQL_SYNC_TEST_SSH_CAPTURE}"
   assert_output --partial "SQL_SYNC_PLATFORM=laravel"
@@ -587,7 +592,7 @@ prod:
   user: deploy
   root: /var/www/example
 FIXEOF
-  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod --dry-run
+  run env PATH="${STUB_DIR}:/usr/bin:/bin" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod @self --dry-run
   assert_success
   assert_output --partial "preflight: ok: local dump dir"
   assert_output --partial "preflight: ok: ssh connectivity"

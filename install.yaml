@@ -30,7 +30,7 @@ post_install_actions:
          credentials are read from the app's own config on the server.
       2. Make sure you can ssh to the server non-interactively
          (key in ~/.ssh, host alias in ~/.ssh/config if you use one).
-      3. Run: ddev sql-sync @prod
+      3. Run: ddev sql-sync @prod @self
 
     Repository: https://github.com/atj4me/ddev-sql-sync
 

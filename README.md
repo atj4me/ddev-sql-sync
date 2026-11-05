@@ -37,7 +37,7 @@ prod:
   tmp: /tmp              # optional; temp folder on the server
 ```
 
-Define as many aliases as you like (`prod`, `staging`, …) and pick one per run: `ddev sql-sync @staging`.
+Define as many aliases as you like (`prod`, `staging`, …) and pick one per run: `ddev sql-sync @staging @self`.
 
 Optional per-alias keys:
 
@@ -84,10 +84,9 @@ If that prompts for a password, set up a key (`ssh-copy-id`) and, if you use a s
 ## Usage
 
 ```bash
-ddev sql-sync @prod           # target @self is implied
-ddev sql-sync @prod @self     # Drush-style, explicit
-ddev sql-sync @prod -y        # skip the confirmation prompt
-ddev sql-sync @prod --dry-run # preflight checks only — nothing is dumped or imported
+ddev sql-sync @prod @self           # source, then target — like cp / rsync / drush sql-sync
+ddev sql-sync @prod @self -y        # skip the confirmation prompt
+ddev sql-sync @prod @self --dry-run # preflight checks only — nothing is dumped or imported
 ```
 
 | Flag | Meaning |
@@ -145,9 +144,9 @@ Deviations, also deliberate:
 
 New server, or just cautious? Work up in three steps:
 
-1. **`ddev sql-sync @prod --dry-run`** — preflight only. It connects over ssh (BatchMode, short timeout, so it fails fast instead of hanging), detects the platform and dump strategy on the server, resolves the credentials (database name and username are shown; the password never is), estimates the database size from `information_schema`, and checks free space in the server's `tmp` folder and your local dump folder. You get a verdict per check plus the plan — then it stops. No dump is taken, nothing is imported, and nothing is written on the server.
-2. **`ddev sql-sync @prod --no-sync`** — a real dump, created on the server and downloaded, but **not** imported or sanitized. Inspect the file if you like.
-3. **`ddev sql-sync @prod`** — the full run.
+1. **`ddev sql-sync @prod @self --dry-run`** — preflight only. It connects over ssh (BatchMode, short timeout, so it fails fast instead of hanging), detects the platform and dump strategy on the server, resolves the credentials (database name and username are shown; the password never is), estimates the database size from `information_schema`, and checks free space in the server's `tmp` folder and your local dump folder. You get a verdict per check plus the plan — then it stops. No dump is taken, nothing is imported, and nothing is written on the server.
+2. **`ddev sql-sync @prod @self --no-sync`** — a real dump, created on the server and downloaded, but **not** imported or sanitized. Inspect the file if you like.
+3. **`ddev sql-sync @prod @self`** — the full run.
 
 What a real run writes on the server: exactly one temp file, `sql-sync.sql` in the alias's `tmp` folder, removed right after the download (see Safety notes). One guard protects small servers: before dumping, every run estimates the database size and aborts if the `tmp` filesystem has less free space than that — a dump filling the disk is the one realistic way a sync could hurt a small server.
 

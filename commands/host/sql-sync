@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 ## #ddev-generated: This file is managed by the sql-sync add-on (atj4me/ddev-sql-sync). It will be overwritten on add-on updates; put your configuration in .ddev/sql-sync/aliases.yml instead.
 ## Description: Sync a database from a remote server into this DDEV project (ssh + mysqldump + rsync + import + sanitize)
-## Usage: sql-sync @prod [@self] [--sanitize|--no-sanitize] [--dump-dir=<path>] [--no-dump] [--no-sync] [-y]
-## Example: "ddev sql-sync @prod" syncs the @prod alias into this project
-## Example: "ddev sql-sync @prod @self" the same, with the target stated explicitly (Drush-style)
-## Example: "ddev sql-sync @prod --no-sanitize" syncs without scrubbing user emails/passwords
+## Usage: sql-sync @prod @self [--sanitize|--no-sanitize] [--dump-dir=<path>] [--no-dump] [--no-sync] [-y]
+## Example: "ddev sql-sync @prod @self" syncs the @prod alias into this project (Drush-style: source, then target)
+## Example: "ddev sql-sync @prod @self --no-sanitize" syncs without scrubbing user emails/passwords
 
 set -euo pipefail
 
@@ -14,7 +13,7 @@ ALIASES_FILE="$ADDON_DIR/aliases.yml"
 
 usage() {
   cat <<'EOF'
-Usage: ddev sql-sync <source> [<target>] [options]
+Usage: ddev sql-sync <source> <target> [options]
 
 Sync a MySQL database from a remote server into this DDEV project:
 ssh + a dump on the remote, rsync the dump down, ddev import-db, then sanitize.
@@ -33,7 +32,11 @@ ssh + a dump on the remote, rsync the dump down, ddev import-db, then sanitize.
                     passed to ssh -J for this sync. Prefer ProxyJump in
                     ~/.ssh/config for regular use; the jump: key is for
                     one-off syncs.
-  <target>          Only @self (this DDEV project) is supported; may be omitted.
+  <target>          The destination, stated like every unix copy/sync
+                    command (cp, rsync, drush sql-sync): source first, then
+                    target. Required, and only @self (this DDEV project) is
+                    accepted — any other target is rejected, so the tool can
+                    never write to a remote server.
 
 Options:
   --sanitize        Sanitize after import (default): scrub user emails and
@@ -182,7 +185,7 @@ done
 
 [ -n "$SOURCE" ] || { usage >&2; fail "a source alias is required, e.g. ddev sql-sync @prod @self"; }
 ALIAS="${SOURCE#@}"
-TARGET="${TARGET:-@self}"
+[ -n "$TARGET" ] || { usage >&2; fail "a target is required: sync commands take a source and a destination (e.g. ddev sql-sync @prod @self). Only @self is accepted as the target."; }
 [ "$TARGET" = "@self" ] || fail "only @self is supported as the target in this version (got '$TARGET'). This tool never writes to a remote server."
 if [ "$NO_DUMP" = "true" ] && [ "$NO_SYNC" = "true" ]; then
   fail "--no-dump and --no-sync together would not do anything: --no-dump expects a dump an earlier --no-sync run left on the server"
