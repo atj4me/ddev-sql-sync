@@ -9,12 +9,18 @@ Sync a production MySQL database into your local [DDEV](https://ddev.com) projec
 
 ## What it does
 
-`ddev sql-sync @prod @self`:
+`ddev sql-sync @prod @self` runs a real **`ddev pull`**:
 
-1. **Dump** — ssh to the server and create a database dump there, staged in a dedicated private folder (`<tmp>/ddev-dumps/`) with a completion marker carrying its byte size. See *Dump strategies* below.
-2. **Download** — rsync the dump into a local folder (default `~/sql-sync`) and verify it against the completion marker before anything is imported. The remote temp files are deleted after a successful import (kept if the import fails, so the same dump can be fetched again with `--no-dump`).
-3. **Import** — `ddev import-db` into this project (you are asked to confirm first; the current local database is replaced).
-4. **Sanitize** — scrub user emails and passwords in the *local* database (on by default; see *Sanitize*).
+1. **Generate** — the command (re)generates a DDEV provider for the alias, `.ddev/providers/<alias>.yaml`, from `.ddev/sql-sync/aliases.yml` — every run, so the provider can never drift from the alias. The generated file contains **no secrets** (see *Database credentials* below).
+2. **Pull** — it then execs `ddev pull <alias>`, whose stages do the work:
+   - `auth_command` — a BatchMode ssh connectivity check that fails the pull fast if the server is unreachable.
+   - `db_pull_command` — ssh to the server and create a database dump there, staged in a dedicated private folder (`<tmp>/ddev-dumps/`) with a completion marker carrying its byte size (see *Dump strategies* below); rsync the dump and marker down; **verify the size against the marker** — any mismatch exits non-zero, and a failing `db_pull_command` makes `ddev pull` abort before the import stage. The dump is normalised to `.ddev/.downloads/db.sql.gz`, a kept copy is saved to the local dump folder (default `~/sql-sync`), and a small state file (`.ddev/sql-sync/.state/<alias>.env`) carries what the import stage needs (platform, WordPress table prefix, sanitize choice).
+   - `db_import_command` — `ddev import-db` the downloaded dump, then **sanitize** (scrub user emails and passwords in the *local* database; on by default, see *Sanitize*). Only after a successful import *and* sanitize are the remote temp files deleted; if the import fails they are kept, so the same dump can be fetched again with `--no-dump`.
+   - `files_pull_command` — only when the alias sets a `files:` key: rsync the remote user-files directory into `.ddev/.downloads/files`, where DDEV's default files import takes over.
+
+Once a provider has been generated, **`ddev pull <alias>` works directly** too, with the same semantics. Per-run choices travel through the pull itself: `--no-sanitize` and `--no-dump` are passed to `ddev pull` as `--environment=SQL_SYNC_SANITIZE=false` / `--environment=SQL_SYNC_NO_DUMP=1`, which the stage helpers read on the host.
+
+> **No `ddev auth ssh` needed** — unlike the platform providers, both stages run on your own machine (`service: host`), which already has your ssh keys, `~/.ssh/config` aliases, custom ports, ProxyJump and known_hosts. `ddev auth ssh` exists to give the *web container* ssh access; nothing here runs ssh inside a container.
 
 The add-on only ever **reads** from the server (a dump). It never writes to a remote database, and `@self` is the only supported target.
 
@@ -52,6 +58,14 @@ Optional per-alias keys:
 | `dump:` | A command on the server whose stdout **is** the dump (e.g. `dump: drush sql-dump`). Replaces both dump strategies below — works for any platform. |
 | `database:` | Explicit database credentials (see below). |
 | `sanitize:` | Path (relative to the project root) to your own SQL file to sanitize with after import. |
+| `files:` | A user-files directory on the server (e.g. `files: /var/www/example/uploads`). When set, the generated provider also pulls these files on every pull. When unset, pulls are database-only (the launcher passes `--skip-files`). |
+
+And under `local:`:
+
+| Key | Purpose |
+| --- | --- |
+| `dir:` | Where downloaded dumps are kept (default `~/sql-sync`). |
+| `snapshot:` | `snapshot: true` takes a `ddev snapshot` of the local database before each sync replaces it — roll back a bad pull with `ddev snapshot restore`. Off by default. |
 
 ### Database credentials: app config first, explicit block when needed
 
@@ -72,7 +86,7 @@ prod:
 
 Any field left out falls back to the app's config, field by field — you can pin just the password, or just host/port for an RDS-style endpoint.
 
-> **Treat a filled-in `password:` as a secret.** Prefer app-config extraction when it works. `aliases.yml` lives under `.ddev/`, which many projects gitignore (check yours), and `chmod 600 .ddev/sql-sync/aliases.yml` is a good idea if you use the block. The password is passed to mysqldump via the `MYSQL_PWD` environment variable only — never as a `-p` argument and never echoed.
+> **Treat a filled-in `password:` as a secret.** Prefer app-config extraction when it works. `aliases.yml` lives under `.ddev/`, which many projects gitignore (check yours), and `chmod 600 .ddev/sql-sync/aliases.yml` is a good idea if you use the block. The password is passed to mysqldump via the `MYSQL_PWD` environment variable only — never as a `-p` argument and never echoed. It is also **never written into the generated provider file**: the provider helpers read `aliases.yml` on the host at run time, so `.ddev/providers/<alias>.yaml` is always safe to commit.
 
 ### One-time SSH setup (your side)
 
@@ -96,9 +110,9 @@ ddev sql-sync @prod @self --dry-run # preflight checks only — nothing is dumpe
 | --- | --- |
 | `--sanitize` / `--no-sanitize` | Sanitize after import (default on) / skip it. Skipping prints a loud warning: the local DB then holds real production emails and password hashes. |
 | `--dump-dir=<path>` | Where the dump is downloaded to (overrides `local.dir`). |
-| `--no-dump` | Don't create a new dump; rsync the dump an earlier `--no-sync` run left on the server. Its completion marker must be present and match the downloaded size, or the run refuses to import. |
-| `--no-sync` | Only create the dump on the server (with its completion marker); don't download, import, or sanitize. A later `--no-dump` run fetches it. |
-| `--dry-run` | Preflight only: check ssh connectivity, platform, dump strategy, credentials (the password is never shown), database size and disk space, then print the plan. Takes no dump and imports nothing. See "Testing safely" for one small footnote. |
+| `--no-dump` | Don't create a new dump; fetch the dump an earlier `--no-sync` run left on the server. Its completion marker must be present and match the downloaded size, or the pull refuses to import. (Travels through the pull as `--environment=SQL_SYNC_NO_DUMP=1`.) |
+| `--no-sync` | Only create the dump on the server (with its completion marker); don't download, import, or sanitize. A later `--no-dump` run fetches it. Launcher-side: does not invoke `ddev pull`, since pull is obtain+import by definition. |
+| `--dry-run` | Preflight only: check ssh connectivity, platform, dump strategy, credentials (the password is never shown), database size and disk space, then print the plan. Takes no dump and imports nothing. Launcher-side, like `--no-sync`. See "Testing safely" for one small footnote. |
 | `-y`, `--yes` | Don't ask for confirmation. |
 | `-h`, `--help` | Show help. |
 
@@ -142,7 +156,7 @@ Mirrored deliberately: the two-position `sql-sync @source @target` form with `@s
 Deviations, also deliberate:
 
 - **Sanitize is folded into the sync and ON by default** (Drush makes it a separate `sql-sanitize` command you must remember to run). `--no-sanitize` opts out.
-- **Only `@self` as target** in v1 — syncing *to* a remote is out of scope by design; the tool never writes to a remote server.
+- **Only `@self` as target** — syncing *to* a remote is out of scope by design; the tool never writes to a remote server.
 - Aliases carry connection + app-path + platform in one flat file rather than Drush's per-site alias files, and credential resolution (app config / explicit block) replaces Drush's reliance on the app's own bootstrap, so it works the same for Laravel and WordPress.
 
 ## Testing safely
@@ -151,7 +165,7 @@ New server, or just cautious? Work up in four steps:
 
 1. **`ddev sql-sync @prod @self --dry-run`** — preflight only. It connects over ssh (BatchMode, short timeout, so it fails fast instead of hanging), detects the platform and dump strategy on the server, resolves the credentials (database name and username are shown; the password never is), estimates the database size from `information_schema`, and checks free space in the server's `tmp` folder and your local dump folder. You get a verdict per check plus the plan — then it stops. No dump is taken and nothing is imported. One footnote: resolving *Drupal* credentials during preflight briefly creates a small temp file (mode 600) in the server's `tmp` folder and deletes it again within the same step — it is the extractor for `settings.php`, not a dump.
 2. **`ddev sql-sync @prod @self --no-sync`** — a real dump, created on the server in `<tmp>/ddev-dumps/` with a completion marker. **Nothing is downloaded** — the point of this step is proving the server side works end to end and leaving a known-good dump in place.
-3. **`ddev sql-sync @prod @self --no-dump`** — fetch the dump step 2 left behind (its completion marker is checked against the downloaded size before anything is imported), then import and sanitize it — without touching the server's database again.
+3. **`ddev sql-sync @prod @self --no-dump`** — fetch the dump step 2 left behind (its completion marker is checked against the downloaded size inside the pull's `db_pull_command`, before anything is imported), then import and sanitize it — without touching the server's database again.
 4. **`ddev sql-sync @prod @self`** — the full run.
 
 What a real run writes on the server: a dump file and a small completion marker in `<tmp>/ddev-dumps/` inside the alias's `tmp` folder (the folder is created mode 700, the dump mode 600), both removed after a successful import. If the import fails, both are kept so a `--no-dump` run can fetch the same dump; if the dump itself fails, its partial file is removed by the remote side. One guard protects small servers: before dumping, a run estimates the database size and aborts if the `tmp` filesystem has less free space than that — whenever the size can be estimated. When it cannot (for example a `dump:` command whose credentials cannot be resolved, or no `mysql` client on the server), the run says so and skips the check rather than pretending it happened — a dump filling the disk is the one realistic way a sync could hurt a small server, so an un-estimable database deserves a second look at the server's free space before a full run.
@@ -162,10 +176,36 @@ What a real run writes on the server: a dump file and a small completion marker 
 - A downloaded dump is production data. The default sanitize scrubs the local **database**, not the dump file on disk; delete dumps you don't need.
 - The add-on stores no credentials of its own anywhere.
 
+## Migrating from v1
+
+v2.0.0 changes how a sync runs internally; your configuration does not change.
+
+- **`aliases.yml` is unchanged** — same file, same keys, never overwritten. Existing aliases work as they are. Two optional keys are new: `files:` per alias and `local.snapshot:`.
+- **The sync is now a `ddev pull`.** v1's host command created the dump, rsynced, imported and sanitized itself. v2's command generates a provider for the alias and execs `ddev pull <alias>`; the stages are provider commands running on the host. Behaviour and safety semantics are preserved: marker verification gates the import, sanitize is on by default and a run that cannot sanitize fails loudly, the remote dump is deleted only after a successful import+sanitize, and a failed import keeps it for a `--no-dump` retry.
+- **Direct `ddev pull <alias>`** works once the launcher has generated the provider for that alias at least once (the launcher regenerates it on every `ddev sql-sync` run, so run that after editing `aliases.yml`). A direct pull uses the defaults: sanitize on, fresh dump. `ddev pull <alias> --environment=SQL_SYNC_SANITIZE=false` opts out of sanitize, exactly like `--no-sanitize`.
+- **`--dry-run` and `--no-sync` remain launcher-side** extras of `ddev sql-sync`; they do not invoke pull (a preflight is not a pull, and pull is obtain+import by definition).
+- Kept dumps still land in the alias's local dir (default `~/sql-sync`); the pull additionally leaves its normalised copy in `.ddev/.downloads/db.sql.gz` until the next pull.
+
+## DDEV fine-tuning verdicts
+
+Design choices made while moving to `ddev pull`, each evaluated rather than assumed:
+
+| DDEV tool | Verdict | Reason |
+| --- | --- | --- |
+| `ddev snapshot` before the pull | **Adopted, opt-in** | `local.snapshot: true` snapshots the local DB before a sync replaces it; `ddev snapshot restore` is the rollback. Off by default — snapshots cost disk and most pulls don't need one. |
+| Hooks from an add-on-shipped `config.*.yaml` (`pre-pull` / `post-pull` / `post-import-db`) | **Rejected for sql-sync's own flow** | Sanitize and remote cleanup must live inside the provider's `db_import_command`, where their failure fails the pull itself. A hook is project configuration the add-on cannot guarantee, and `post-pull` runs only after a successful pull — too late to gate anything. (Nothing stops you adding your own hooks in your project's config; DDEV will run them around pulls as usual.) |
+| `ddev pull --environment` | **Adopted** | Per-run values (`SQL_SYNC_SANITIZE`, `SQL_SYNC_NO_DUMP`, `SQL_SYNC_DUMP_DIR`) reach the host stage helpers through the pull invocation itself — no wrapper state. Data created *during* the pull (platform, WordPress prefix) travels stage-to-stage in the state file instead, because it doesn't exist when the pull starts. |
+| `web_environment` / `.ddev/config.local.yaml` for the DB password pin | **Rejected** | The pin stays in `aliases.yml`: one config source, read on the host by the helpers and merged field-by-field on the server. `web_environment` would inject the secret into the web container's environment for a need that is entirely host-side. |
+| Optional files pull via provider `files_pull_command` | **Adopted, opt-in** | An alias `files:` key generates a host rsync stage into `.ddev/.downloads/files` and DDEV's default files import does the rest — the same shape the platform providers use. Off by default; the launcher passes `--skip-files` when unset. |
+| Mutagen sync flush | **Noted, no work** | `Pull()` already flushes Mutagen before and after the download and import stages. |
+| `code_pull_command` | **Noted, out of scope** | This is a database (and user-files) tool; code travels by git. |
+| `ddev auth ssh` | **Rejected as a requirement** | It exists to give the *web container* ssh access. Both provider stages run on the host, which already has your keys, `~/.ssh/config` aliases, custom ports, ProxyJump and known_hosts — none of which `auth ssh` carries into a container. DDEV v1.25.5's host-side ssh-agent support mitigates the "keys inside the container" concern, but not the config one. |
+| `auth_command` stanza as a connectivity preflight | **Adopted** | The generated provider's `auth_command` is a BatchMode ssh check (`ConnectTimeout=10`) that runs before `db_pull_command` and fails the pull fast on connectivity problems — including for direct `ddev pull <alias>` runs, which never see the launcher's `--dry-run` preflight. |
+
 ## Removal
 
 ```bash
 ddev add-on remove sql-sync
 ```
 
-This removes the command and the bundled files. Your `aliases.yml` and any downloaded dumps are left in place — delete them manually if you want them gone.
+This removes the command and the bundled files. Your `aliases.yml`, any downloaded dumps, the generated providers under `.ddev/providers/` and the stage state files under `.ddev/sql-sync/.state/` are left in place — delete them manually if you want them gone.
