@@ -16,6 +16,9 @@
 local:
   # Folder the downloaded dumps are kept in. --dump-dir overrides this.
   dir: ~/sql-sync
+  # Take a `ddev snapshot` of the local database before a sync replaces
+  # it, so a bad pull can be rolled back with `ddev snapshot restore`.
+  # snapshot: true
 
 prod:
   # An ~/.ssh/config alias or a hostname.
@@ -62,6 +65,11 @@ prod:
   # built-in sanitize on every platform — including drupal, where it wins
   # over ddev drush sql-sanitize (explicit per-alias config wins).
   # sanitize: .ddev/sql-sync/my-sanitize.sql
+  # Optional: a user-files directory on the server. When set, the
+  # generated ddev provider also pulls these files (rsync into
+  # .ddev/.downloads/files, then DDEV's default files import), like the
+  # platform providers do. When unset, pulls are database-only.
+  # files: /var/www/example/uploads
 
 # staging:
 #   host: staging.example.com

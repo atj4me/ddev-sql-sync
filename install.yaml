@@ -2,14 +2,20 @@ name: sql-sync
 ddev_version_constraint: '>= v1.24.10'
 project_files:
   - commands/host/sql-sync
+  - sql-sync/lib.sh
   - sql-sync/remote-dump.sh
+  - sql-sync/pull-db.sh
+  - sql-sync/import-db.sh
+  - sql-sync/auth-check.sh
+  - sql-sync/pull-files.sh
   - sql-sync/sanitize-laravel.sql
   - sql-sync/sanitize-wordpress.sql
   - sql-sync/aliases.example.yml
 removal_actions:
   - |
     #ddev-description:Remove sql-sync command and bundled files
-    rm -f ${DDEV_APPROOT}/.ddev/commands/host/sql-sync ${DDEV_APPROOT}/.ddev/sql-sync/remote-dump.sh ${DDEV_APPROOT}/.ddev/sql-sync/sanitize-laravel.sql ${DDEV_APPROOT}/.ddev/sql-sync/sanitize-wordpress.sql ${DDEV_APPROOT}/.ddev/sql-sync/aliases.example.yml
+    rm -f ${DDEV_APPROOT}/.ddev/commands/host/sql-sync ${DDEV_APPROOT}/.ddev/sql-sync/lib.sh ${DDEV_APPROOT}/.ddev/sql-sync/remote-dump.sh ${DDEV_APPROOT}/.ddev/sql-sync/pull-db.sh ${DDEV_APPROOT}/.ddev/sql-sync/import-db.sh ${DDEV_APPROOT}/.ddev/sql-sync/auth-check.sh ${DDEV_APPROOT}/.ddev/sql-sync/pull-files.sh ${DDEV_APPROOT}/.ddev/sql-sync/sanitize-laravel.sql ${DDEV_APPROOT}/.ddev/sql-sync/sanitize-wordpress.sql ${DDEV_APPROOT}/.ddev/sql-sync/aliases.example.yml
+    echo "Note: providers generated under .ddev/providers/ and the state files under .ddev/sql-sync/.state/ are left in place — delete them manually if you want them gone. Your aliases.yml and downloaded dumps are also left in place."
 post_install_actions:
   - |
     #ddev-description:Create aliases.yml from the example if it does not exist yet
@@ -22,6 +28,12 @@ post_install_actions:
 
     Sync a production database into this DDEV project:
       ddev sql-sync @prod @self
+
+    The sync runs as a real ddev pull: the command generates a DDEV
+    provider for your alias (.ddev/providers/<alias>.yaml) from
+    aliases.yml on every run and then runs `ddev pull <alias>`. No
+    `ddev auth ssh` is needed — the provider stages run on your own
+    machine, with your own ssh keys and ~/.ssh/config.
 
     Setup:
       1. Edit .ddev/sql-sync/aliases.yml — set your server's host (an
