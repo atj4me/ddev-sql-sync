@@ -2,6 +2,9 @@
 # `ddev sql-sync` run — do not edit; edit aliases.yml instead.
 # This file contains no secrets: the helpers read aliases.yml (including
 # any database password pin) on the host at run time.
+environment_variables:
+  SQL_SYNC_SANITIZE: "true"
+  SQL_SYNC_NO_DUMP: "0"
 auth_command:
   command: |
     bash "$DDEV_APPROOT/.ddev/sql-sync/auth-check.sh" prod

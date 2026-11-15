@@ -86,6 +86,12 @@ case "$1" in
     fi
     alias_name="$2"
     shift 2
+    stub_provider="${SQL_SYNC_TEST_FAKE_DIR}/.ddev/providers/${alias_name}.yaml"
+    if [ -f "$stub_provider" ]; then
+      while IFS='=' read -r kv_key kv_val; do
+        [ -n "$kv_key" ] && export "$kv_key=$kv_val"
+      done < <(awk '/^environment_variables:/{f=1; next} f && /^  [A-Za-z_]+:/{key=$1; sub(/:$/, "", key); val=$2; gsub(/"/, "", val); print key "=" val} f && /^[^ ]/{f=0}' "$stub_provider")
+    fi
     skip_files=""
     skip_import=""
     for a in "$@"; do
@@ -215,7 +221,7 @@ EOF
   [[ "$output" == *"ddev: pull prod --skip-files -y"* ]]
 }
 
-@test "launcher: files alias drops --skip-files, sanitize/no-dump/dump-dir travel via --environment" {
+@test "launcher: files alias drops --skip-files, per-run values travel via provider environment_variables" {
   make_fake_project
   write_aliases <<'EOF'
 prod:
@@ -227,8 +233,13 @@ prod:
 EOF
   run env HOME="${TEST_HOME}" PATH="${TEST_PATH}" bash "${FAKE_DIR}/.ddev/commands/host/sql-sync" @prod @self -y --no-sanitize --no-dump --dump-dir=/tmp/kept
   [ "$status" -eq 0 ]
+  run cat "${FAKE_DIR}/.ddev/providers/prod.yaml"
+  [[ "$output" == *'SQL_SYNC_SANITIZE: "false"'* ]]
+  [[ "$output" == *'SQL_SYNC_NO_DUMP: "1"'* ]]
+  [[ "$output" == *'SQL_SYNC_DUMP_DIR: "/tmp/kept"'* ]]
   run cat "${SQL_SYNC_TEST_DDEV_CAPTURE}"
-  [[ "$output" == *"ddev: pull prod --environment=SQL_SYNC_SANITIZE=false --environment=SQL_SYNC_NO_DUMP=1 --environment=SQL_SYNC_DUMP_DIR=/tmp/kept -y"* ]]
+  [[ "$output" == *"ddev: pull prod -y"* ]]
+  [[ "$output" != *"--environment"* ]]
   run grep -c "files_pull_command" "${FAKE_DIR}/.ddev/providers/prod.yaml"
   [[ "$output" == "1" ]]
 }

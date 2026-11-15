@@ -233,6 +233,8 @@ fi
 
 # --- Generate the provider and pull -------------------------------------------
 
+NO_DUMP_ENV="0"
+[ "$NO_DUMP" = "true" ] && NO_DUMP_ENV="1"
 PROVIDER_FILE="$APPROOT/.ddev/providers/$ALIAS.yaml"
 mkdir -p "$APPROOT/.ddev/providers"
 {
@@ -241,6 +243,9 @@ mkdir -p "$APPROOT/.ddev/providers"
 # \`ddev sql-sync\` run — do not edit; edit aliases.yml instead.
 # This file contains no secrets: the helpers read aliases.yml (including
 # any database password pin) on the host at run time.
+environment_variables:
+  SQL_SYNC_SANITIZE: "$SANITIZE"
+  SQL_SYNC_NO_DUMP: "$NO_DUMP_ENV"
 auth_command:
   command: |
     bash "\$DDEV_APPROOT/.ddev/sql-sync/auth-check.sh" $ALIAS
@@ -254,6 +259,11 @@ db_import_command:
     bash "\$DDEV_APPROOT/.ddev/sql-sync/import-db.sh" $ALIAS
   service: host
 EOF
+  if [ -n "$DUMP_DIR_CLI" ]; then
+    cat <<EOF
+  SQL_SYNC_DUMP_DIR: "$DUMP_DIR_CLI"
+EOF
+  fi
   if [ -n "$FILES_DIR" ]; then
     cat <<EOF
 files_pull_command:
@@ -269,15 +279,8 @@ PULL_ARGS=("$ALIAS")
 if [ -z "$FILES_DIR" ]; then
   PULL_ARGS+=("--skip-files")
 fi
-if [ "$SANITIZE" != "true" ]; then
-  PULL_ARGS+=("--environment=SQL_SYNC_SANITIZE=false")
-fi
-if [ "$NO_DUMP" = "true" ]; then
-  PULL_ARGS+=("--environment=SQL_SYNC_NO_DUMP=1")
-fi
-if [ -n "$DUMP_DIR_CLI" ]; then
-  PULL_ARGS+=("--environment=SQL_SYNC_DUMP_DIR=$DUMP_DIR_CLI")
-fi
+# Per-run values travel in the generated provider's environment_variables:
+# DDEV (v1.25.5) honours only the last --environment flag on ddev pull.
 if [ "$ASSUME_YES" = "true" ]; then
   PULL_ARGS+=("-y")
 fi
