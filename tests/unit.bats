@@ -306,6 +306,22 @@ EOF
   [[ "$output" == *"cannot reach"* ]]
 }
 
+@test "auth-check: quoted options reach ssh without the quotes" {
+  make_fake_project
+  write_aliases <<'EOF'
+prod:
+  host: app.example.com
+  user: deploy
+  root: /var/www/example
+  options: "-p 2223 -i ~/.ssh/testkey"
+EOF
+  run env HOME="${TEST_HOME}" PATH="${TEST_PATH}" bash "${FAKE_DIR}/.ddev/sql-sync/auth-check.sh" prod
+  [ "$status" -eq 0 ]
+  run cat "${SQL_SYNC_TEST_SSH_CAPTURE}"
+  [[ "$output" == *"-p 2223 -i ~/.ssh/testkey"* ]]
+  [[ "$output" != *'"-p'* ]]
+}
+
 @test "pull-db: happy path verifies, normalises to db.sql.gz, keeps a copy, writes state" {
   make_fake_project
   write_aliases <<EOF

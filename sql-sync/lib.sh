@@ -139,7 +139,7 @@ then fill in your server's host and app path. See the example file for the forma
   ALIAS_USER="$(unquote "$(alias_value "$alias" user)")"
   ALIAS_ROOT="$(unquote "$(alias_value "$alias" root)")"
   ALIAS_TMP="$(unquote "$(alias_value "$alias" tmp)")"
-  ALIAS_OPTIONS="$(alias_value "$alias" options)"
+  ALIAS_OPTIONS="$(unquote "$(alias_value "$alias" options)")"
   ALIAS_JUMP="$(unquote "$(alias_value "$alias" jump)")"
   PLATFORM="$(unquote "$(alias_value "$alias" platform)")"
   DUMP_CMD="$(unquote "$(alias_value "$alias" dump)")"
