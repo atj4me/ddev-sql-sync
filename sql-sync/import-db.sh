@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+## #ddev-generated: This file is managed by the sql-sync add-on (atj4me/ddev-sql-sync). It will be overwritten on add-on updates; do not edit the installed copy.
 # db_import_command helper for the generated sql-sync provider: imports
 # the downloaded dump with ddev import-db, sanitizes, and only then
 # deletes the remote temp files. Any failure exits non-zero (and the

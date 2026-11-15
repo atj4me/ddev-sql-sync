@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+## #ddev-generated: This file is managed by the sql-sync add-on (atj4me/ddev-sql-sync). It will be overwritten on add-on updates; do not edit the installed copy.
 # files_pull_command helper for the generated sql-sync provider: rsyncs
 # the alias's remote user-files directory into .ddev/.downloads/files,
 # where ddev pull's default files import takes over.

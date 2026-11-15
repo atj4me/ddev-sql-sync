@@ -322,6 +322,15 @@ EOF
   [[ "$output" != *'"-p'* ]]
 }
 
+@test "install: every project file in install.yaml carries the #ddev-generated signature" {
+  files="$(awk '/^project_files:/{f=1; next} f && /^  - /{print $2} f && /^[^ ]/{f=0}' "${DIR}/install.yaml")"
+  [ -n "$files" ]
+  for f in $files; do
+    run grep -q '#ddev-generated' "${DIR}/${f}"
+    [ "$status" -eq 0 ] || { echo "missing #ddev-generated signature: $f"; return 1; }
+  done
+}
+
 @test "pull-db: happy path verifies, normalises to db.sql.gz, keeps a copy, writes state" {
   make_fake_project
   write_aliases <<EOF

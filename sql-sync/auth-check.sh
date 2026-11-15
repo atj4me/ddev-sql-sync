@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+## #ddev-generated: This file is managed by the sql-sync add-on (atj4me/ddev-sql-sync). It will be overwritten on add-on updates; do not edit the installed copy.
 # auth_command helper for the generated sql-sync provider: a BatchMode
 # ssh connectivity check that runs before db_pull and fails the pull fast
 # when the server cannot be reached, instead of mid-dump.

@@ -1,3 +1,4 @@
+# #ddev-generated: This file is managed by the sql-sync add-on (atj4me/ddev-sql-sync). It will be overwritten on add-on updates; do not edit the installed copy.
 # Shared alias loading for the sql-sync launcher and the ddev pull helpers.
 # Sourced, not executed. Expects APPROOT and ADDON_DIR to be set, and
 # ALIASES_FILE to point at the user's aliases.yml.

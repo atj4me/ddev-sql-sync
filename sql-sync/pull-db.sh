@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+## #ddev-generated: This file is managed by the sql-sync add-on (atj4me/ddev-sql-sync). It will be overwritten on add-on updates; do not edit the installed copy.
 # db_pull_command helper for the generated sql-sync provider: creates the
 # dump on the server (unless SQL_SYNC_NO_DUMP is set), rsyncs it and its
 # completion marker down, verifies the size, and leaves the result where
